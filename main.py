@@ -1,0 +1,1 @@
+print("XK7-RAG is ready")
