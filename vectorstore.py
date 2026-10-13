@@ -33,7 +33,7 @@ def build_index(pdf_path):
     return len(chunks)
 
 
-def search(question, k=5):
+def search(question, k=3):
     """Renvoie les k chunks les plus proches de la question."""
     collection = get_collection()
     vector = embedder.embed_query(question)
