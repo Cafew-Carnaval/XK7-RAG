@@ -1,8 +1,7 @@
 from dotenv import load_dotenv
 import chromadb
 from langchain_openai import OpenAIEmbeddings
-from loader import load_pdf, split_pages
-
+from loader import split_sections
 load_dotenv()
 
 DB_PATH = "chroma_db"          # dossier où ChromaDB enregistre la base
@@ -18,17 +17,24 @@ def get_collection():
 
 
 def build_index(pdf_path):
-    """Lit le PDF, le découpe, calcule les embeddings et range tout dans ChromaDB."""
-    chunks = split_pages(load_pdf(pdf_path))
+    """Découpe le PDF par sections, calcule les embeddings et reconstruit la base ChromaDB."""
+    chunks = split_sections(pdf_path)
     texts = [c["text"] for c in chunks]
     vectors = embedder.embed_documents(texts)   # appel à OpenAI
 
-    collection = get_collection()
-    collection.upsert(
+    client = chromadb.PersistentClient(path=DB_PATH)
+    try:
+        client.delete_collection(COLLECTION)    # on repart d'une base vide
+    except Exception:
+        pass                                    # la base n'existait pas encore
+    collection = client.get_or_create_collection(COLLECTION)
+    collection.add(
         ids=[f"chunk-{i}" for i in range(len(chunks))],
         documents=texts,
         embeddings=vectors,
-        metadatas=[{"page": c["page"], "source": pdf_path} for c in chunks],
+        metadatas=[
+            {"page": c["page"], "section": c["section"], "source": pdf_path} for c in chunks
+        ],
     )
     return len(chunks)
 
