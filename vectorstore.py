@@ -33,7 +33,7 @@ def build_index(pdf_path):
     return len(chunks)
 
 
-def search(question, k=3):
+def search(question, k=5):
     """Renvoie les k chunks les plus proches de la question."""
     collection = get_collection()
     vector = embedder.embed_query(question)
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     n = build_index("data/test.pdf")
     print(f"{n} chunks indexés dans ChromaDB")
 
-    question = "C'est quoi l'intégrité référentielle ?"
+    question = "comment passer du Modèle Relationnel au modèle physique ?"
     print(f"\nQuestion : {question}\n")
     for h in search(question):
         print(f"--- page {h['page']} (distance {h['distance']:.3f}) ---")
