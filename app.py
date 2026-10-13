@@ -2,7 +2,7 @@ import streamlit as st
 from rag import answer
 
 st.set_page_config(page_title="XK7-RAG", page_icon="🤖")
-st.title("🤖 XK7-RAG")
+st.title(" XK7-RAG")
 st.caption("Pose une question sur le cours de bases de données et SQL.")
 
 # Curseur dans la barre latérale : nombre de passages consultés (de 1 à 10, 3 par défaut)
