@@ -126,7 +126,18 @@ streamlit run app.py
 ## Sources
 
 Les documents utilisés pour les tests (un cours universitaire public sur les bases de données) ne sont pas inclus dans ce dépôt.
+## Résultats
 
+Le projet est évalué avec un jeu de 10 questions sur le cours (3 simples, 3 moyennes, 3 difficiles et 1 hors sujet). Pour chaque question, on vérifie si la bonne page est retrouvée et si l'agent répond.
+
+| Mesure | Découpage par page | Découpage par section |
+|---|---|---|
+| Bonne page dans les 3 premiers passages | 8/9 | 9/9 |
+| Bonne page en première position | 7/9 | 9/9 |
+| L'agent répond | 6/9 | 8/9 |
+| Question hors sujet refusée | oui | oui |
+
+Le découpage par section utilise les signets du PDF pour couper le texte à chaque titre, et recopie le titre en tête de chaque passage. Un passage qui traite d'un seul sujet, annoncé par son titre, est beaucoup mieux retrouvé.
 ## Auteur
 
 Yanis SINI
