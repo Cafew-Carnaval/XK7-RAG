@@ -1,7 +1,7 @@
 import re
-from pypdf import PdfReader
 import unicodedata
 from pypdf import PdfReader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Dictionnaire : nom technique d'une lettre -> vraie lettre
 SPECIAL_CHARS = {
@@ -11,11 +11,11 @@ SPECIAL_CHARS = {
 }
 
 
-# ÉTAPE 3 : nettoyer le texte
 def clean_text(text):
+    """Nettoie les défauts typiques des PDF générés avec LaTeX."""
     # Remplacer les ligatures Unicode : "ﬀ" -> "ff", "ﬁ" -> "fi"
     text = unicodedata.normalize("NFKC", text)
-    
+
     # Réparer les lettres collées : "/f_ichiers" -> "fichiers"
     text = re.sub(r"/((?:[a-z]_)+[a-z])", lambda m: m.group(1).replace("_", ""), text)
 
@@ -31,22 +31,41 @@ def clean_text(text):
     # Recoller les mots coupés : "applica-\ntions" -> "applications"
     text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
 
+    # Supprimer le pied de page "BDSQL1 2"
+    text = re.sub(r"BDSQL1\s+\d+\s*$", "", text)
+
     return text
 
 
-# ÉTAPES 1 et 2 : ouvrir le PDF et lire chaque page
 def load_pdf(path):
+    """Lit un PDF et renvoie une liste de pages avec leur texte nettoyé."""
     reader = PdfReader(path)
     pages = []
     for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        pages.append({"page": i + 1, "text": clean_text(text)})
+        text = clean_text(page.extract_text() or "")
+        if text.count(". . .") > 5:   # beaucoup de pointillés = page de sommaire
+            continue                  # on saute cette page
+        pages.append({"page": i + 1, "text": text})
     return pages
 
 
-# TEST : ne se lance que si on tape "python loader.py"
+def split_pages(pages, chunk_size=1000, overlap=150):
+    """Découpe chaque page en morceaux (chunks), en gardant le numéro de page."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=overlap,
+    )
+    chunks = []
+    for p in pages:
+        for piece in splitter.split_text(p["text"]):
+            chunks.append({"page": p["page"], "text": piece})
+    return chunks
+
+
 if __name__ == "__main__":
     pages = load_pdf("data/test.pdf")
-    print(f"{len(pages)} pages lues")
-    print("--- Fin de la page 10 ---")
-    print(pages[9]["text"][-600:])
+    chunks = split_pages(pages)
+    print(f"{len(pages)} pages -> {len(chunks)} chunks")
+    print("--- Exemple : chunk n°20 ---")
+    print(f"(page {chunks[20]['page']})")
+    print(f"Longueur : {len(chunks[20]['text'])} caractères")
