@@ -1,13 +1,12 @@
 from eval_questions import QUESTIONS
-from vectorstore import search
-from rag import answer, REFUS
+from rag import answer, retrieve, REFUS
 
 KS = [3, 6, 10]
 
 
 def rank_of_first_good(question, source, expected_pages, max_k=10):
     """Renvoie la position du premier bon passage (bon document et bonne page), ou None."""
-    hits = search(question, k=max_k)
+    hits = retrieve(question, k=max_k)   # même recherche que l'agent (français + anglais)
     for position, h in enumerate(hits, start=1):
         if h["source"] == source and h["page"] in expected_pages:
             return position

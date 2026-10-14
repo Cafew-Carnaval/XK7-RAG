@@ -31,16 +31,22 @@ st.session_state.setdefault("nb_questions", 0)
 
 
 def show_sources(sources):
-    """Affiche les passages cités, avec leur section et leur page."""
+    """Affiche les passages cités, regroupés par document et par page."""
     if not sources:
         return
-    with st.expander(f"Sources ({len(sources)})"):
-        for h in sources:
-            text = h["text"]
-            text = text.split("\n", 1)[1] if "\n" in text else ""   # retire la ligne de titre du chunk
+    pages = {}
+    for h in sources:
+        key = (h.get("source", ""), h["page"])
+        text = h["text"].split("\n", 1)[1] if "\n" in h["text"] else ""   # retire la ligne de titre
+        if key not in pages:
             section = " > ".join(h.get("section", "").split(" > ")[-2:])
-            st.markdown(f"**{h.get('source', '')}** · {section} · page {h['page']}")
-            st.caption(text[:600] + ("…" if len(text) > 600 else ""))
+            pages[key] = {"section": section, "texts": []}
+        pages[key]["texts"].append(text)
+    with st.expander(f"Sources ({len(pages)})"):
+        for (source, page), info in pages.items():
+            excerpt = " ".join(info["texts"])
+            st.markdown(f"**{source}** · {info['section']} · page {page}")
+            st.caption(excerpt[:600] + ("…" if len(excerpt) > 600 else ""))
 
 
 # --- Barre latérale
@@ -80,9 +86,9 @@ with st.sidebar:
     )
     st.caption(
         "Sources : un cours universitaire de SQL ; Database Design, A. Watt et N. Eng (CC BY 4.0) ; "
+        "Documentation de PostgreSQL 18, The PostgreSQL Global Development Group (licence PostgreSQL) ; "
         "Readings in Database Systems, P. Bailis, J. M. Hellerstein et M. Stonebraker (CC BY-NC-ND)."
     )
-    
 
 # --- Écran d'accueil
 st.title("XK7-RAG")

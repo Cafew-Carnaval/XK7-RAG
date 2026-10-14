@@ -22,6 +22,15 @@ DOCUMENTS = {
         "header": False,
         "footer": True,
     },
+    "postgresql.pdf": {
+        "title": "PostgreSQL 18",
+        "authors": "The PostgreSQL Global Development Group",
+        "license": "Licence PostgreSQL",
+        "header": True,
+        "footer": True,
+        # On ne garde que les parties sur le langage SQL : Tutorial, The SQL Language, SQL Commands
+        "pages": [(40, 600), (1643, 2167)],
+    },
     "redbook.pdf": {
         "title": "Red Book",
         "authors": "Peter Bailis, Joseph M. Hellerstein, Michael Stonebraker",
@@ -65,14 +74,18 @@ def clean_text(text):
     return text
 
 
-def load_pdf(path):
-    """Lit un PDF et renvoie une liste de pages avec leur texte nettoyé."""
+def load_pdf(path, page_ranges=None):
+    """Lit un PDF et renvoie une liste de pages avec leur texte nettoyé.
+    page_ranges : liste de (première page, dernière page) à lire ; None = tout le document."""
     reader = PdfReader(path)
     pages = []
     for i, page in enumerate(reader.pages):
+        if page_ranges and not any(a <= i + 1 <= b for a, b in page_ranges):
+            continue
         text = clean_text(page.extract_text() or "")
-        if text.count(". . .") > 5:   # beaucoup de pointillés = page de sommaire
-            continue                  # on saute cette page
+        # Beaucoup de pointillés (". . ." ou ".....") = page de sommaire : on la saute
+        if text.count(". . .") > 5 or len(re.findall(r"\.{5,}", text)) > 5:
+            continue
         pages.append({"page": i + 1, "text": text})
     return pages
 
@@ -107,7 +120,8 @@ def get_outline(reader):
             if isinstance(item, list):
                 walk(item, level + 1)
             else:
-                entries.append((level, item.title, reader.get_destination_page_number(item) + 1))
+                title = unicodedata.normalize("NFKC", item.title)   # espaces insécables -> espaces
+                entries.append((level, title, reader.get_destination_page_number(item) + 1))
 
     walk(reader.outline, 0)
     return entries
@@ -138,12 +152,14 @@ def split_subsections(section):
     return parts
 
 
-def split_sections(path, chunk_size=1000, overlap=150, source="Document", header=True, footer=False):
+def split_sections(path, chunk_size=1000, overlap=150, source="Document", header=True, footer=False,
+                   page_ranges=None):
     """Découpe un PDF selon ses sections, avec le titre recopié en tête de chaque chunk.
-    source : titre court du document ; header / footer : retirer l'en-tête et le numéro de page."""
+    source : titre court du document ; header / footer : retirer l'en-tête et le numéro de page ;
+    page_ranges : ne garder que certaines pages (None = tout le document)."""
     reader = PdfReader(path)
     outline = get_outline(reader)
-    pages = load_pdf(path)
+    pages = load_pdf(path, page_ranges)
     if not outline:  # PDF sans signets : on garde le découpage par page
         return [dict(c, section="", source=source) for c in split_pages(pages, chunk_size, overlap)]
 
@@ -167,11 +183,18 @@ def split_sections(path, chunk_size=1000, overlap=150, source="Document", header
         return next((start for start, n in page_starts if n >= num), len(full_text))
 
     # 2. Position de chaque titre de section, grâce aux signets du PDF
-    entries = []  # (position, niveau, chemin des titres)
+    # Chemin complet de chaque signet (calculé sur tout le sommaire), puis on ne garde que les pages lues
+    with_paths = []
     titles = []
-    cursor = 0
     for level, title, page in outline:
         titles = titles[:level] + [title]
+        with_paths.append((level, title, page, list(titles)))
+    if page_ranges:
+        with_paths = [e for e in with_paths if any(a <= e[2] <= b for a, b in page_ranges)]
+
+    entries = []  # (position, niveau, chemin des titres)
+    cursor = 0
+    for level, title, page, titles in with_paths:
         start = max(cursor, page_offset(page))
         pos = find_title(full_text, title, start)
         pos = start if pos == -1 else full_text.rfind("\n", 0, pos) + 1
@@ -217,7 +240,8 @@ def load_corpus(folder="data"):
     for path in sorted(Path(folder).glob("*.pdf")):
         info = DOCUMENTS.get(path.name, {"title": path.stem, "header": False, "footer": True})
         doc_chunks = split_sections(
-            str(path), source=info["title"], header=info["header"], footer=info["footer"]
+            str(path), source=info["title"], header=info["header"], footer=info["footer"],
+            page_ranges=info.get("pages"),
         )
         print(f"{info['title']} : {len(doc_chunks)} chunks")
         chunks += doc_chunks
