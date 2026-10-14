@@ -1,16 +1,43 @@
+import os
 import streamlit as st
+from dotenv import load_dotenv
 from rag import answer
 
-st.set_page_config(page_title="XK7-RAG", page_icon="🤖")
-st.title(" XK7-RAG")
+load_dotenv()
+
+MAX_QUESTIONS = 20  # nombre maximum de questions par visite
+
+st.set_page_config(page_title="XK7-RAG")
+st.title("XK7-RAG")
 st.caption("Pose une question sur le cours de bases de données et SQL.")
 
-# Curseur dans la barre latérale : nombre de passages consultés (de 1 à 10, 3 par défaut)
+# Mot de passe : demandé seulement s'il est défini (dans .env ou dans les secrets en ligne)
+password = os.getenv("APP_PASSWORD")
+if password and not st.session_state.get("auth"):
+    entered = st.text_input("Mot de passe", type="password")
+    if entered == password:
+        st.session_state["auth"] = True
+        st.rerun()
+    elif entered:
+        st.error("Mot de passe incorrect.")
+    st.stop()
+
+# Curseur dans la barre latérale : nombre de passages consultés
 k = st.sidebar.slider("Nombre de passages consultés", 1, 10, 3)
 
-question = st.text_input("Ta question")
+# Compteur de questions pour cette visite
+st.session_state.setdefault("nb_questions", 0)
 
-if question:
+with st.form("question_form"):
+    question = st.text_input("Ta question")
+    submitted = st.form_submit_button("Envoyer")
+
+if submitted and question:
+    if st.session_state["nb_questions"] >= MAX_QUESTIONS:
+        st.warning("Limite de questions atteinte pour cette visite.")
+        st.stop()
+    st.session_state["nb_questions"] += 1
+
     with st.spinner("Recherche dans le cours..."):
         reply, hits = answer(question, k=k)
 
