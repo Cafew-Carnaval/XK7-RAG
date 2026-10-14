@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 import chromadb
 from langchain_openai import OpenAIEmbeddings
 from loader import split_sections
+
 load_dotenv()
 
 DB_PATH = "chroma_db"          # dossier où ChromaDB enregistre la base
@@ -49,7 +50,12 @@ def search(question, k=3):
     for text, meta, dist in zip(
         results["documents"][0], results["metadatas"][0], results["distances"][0]
     ):
-        hits.append({"page": meta["page"], "text": text, "distance": dist})
+        hits.append({
+            "page": meta["page"],
+            "section": meta.get("section", ""),
+            "text": text,
+            "distance": dist,
+        })
     return hits
 
 
@@ -57,7 +63,7 @@ if __name__ == "__main__":
     n = build_index("data/test.pdf")
     print(f"{n} chunks indexés dans ChromaDB")
 
-    question = "comment passer du Modèle Relationnel au modèle physique ?"
+    question = "C'est quoi l'intégrité référentielle ?"
     print(f"\nQuestion : {question}\n")
     for h in search(question):
         print(f"--- page {h['page']} (distance {h['distance']:.3f}) ---")
