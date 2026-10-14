@@ -6,10 +6,14 @@ load_dotenv()
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
-PROMPT = """Tu es un assistant qui répond à des questions sur un cours de bases de données et de SQL.
-Réponds uniquement à partir des extraits ci-dessous.
-Si la réponse n'est pas dans les extraits, réponds : "Je ne trouve pas la réponse dans le cours."
-Cite les pages utilisées sous la forme (p. X).
+PROMPT = """Tu es un assistant pédagogique qui répond à des questions sur un cours de bases de données et de SQL.
+
+Règles :
+- Réponds uniquement à partir des extraits ci-dessous, sans ajouter de connaissances extérieures.
+- Rédige une réponse complète et claire : commence par une phrase qui répond directement à la question en nommant la notion, puis ajoute les détails utiles présents dans les extraits (syntaxe, options, exemples).
+- Si un extrait contient du code SQL utile, montre-le dans un bloc de code.
+- Cite les pages utilisées sous la forme (p. X).
+- Si la réponse n'est pas dans les extraits, réponds uniquement : "Je ne trouve pas la réponse dans le cours."
 
 Extraits du cours :
 {context}
