@@ -23,7 +23,20 @@ if password and not st.session_state.get("auth"):
     st.stop()
 
 # Curseur dans la barre latérale : nombre de passages consultés
-k = st.sidebar.slider("Nombre de passages consultés", 1, 10, 3)
+st.sidebar.header("Réglages")
+k = st.sidebar.slider(
+    "Nombre de passages consultés",
+    1, 10, 3,
+    help="Nombre d'extraits du cours que l'assistant lit avant de répondre.",
+)
+st.sidebar.caption(
+    "Avant de répondre, l'assistant cherche dans le cours les passages les plus proches "
+    "de ta question, puis rédige sa réponse uniquement à partir de ces passages.\n\n"
+    "Peu de passages (1 à 3) : réponse plus ciblée.\n\n"
+    "Plus de passages (5 à 10) : utile si la réponse est répartie sur plusieurs parties du cours, "
+    "mais la réponse peut être moins précise.\n\n"
+    "Si l'assistant ne trouve pas la réponse, essaie d'augmenter ce nombre ou de reformuler ta question."
+)
 
 # Compteur de questions pour cette visite
 st.session_state.setdefault("nb_questions", 0)
