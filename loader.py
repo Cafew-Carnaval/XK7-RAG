@@ -1,7 +1,35 @@
 import re
 import unicodedata
+from pathlib import Path
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# Catalogue du corpus : nom du fichier dans data/ -> titre court (cité dans les réponses),
+# auteurs et licence (affichés dans les sources), en-tête en 1re ligne de chaque page (header)
+# et numéro de page en dernière ligne (footer)
+DOCUMENTS = {
+    "test.pdf": {
+        "title": "Cours SQL",
+        "authors": "Cours universitaire public",
+        "license": "Cours public",
+        "header": True,
+        "footer": False,  # pied de page déjà retiré par clean_text
+    },
+    "database_design.pdf": {
+        "title": "Database Design",
+        "authors": "Adrienne Watt, Nelson Eng",
+        "license": "CC BY 4.0",
+        "header": False,
+        "footer": True,
+    },
+    "redbook.pdf": {
+        "title": "Red Book",
+        "authors": "Peter Bailis, Joseph M. Hellerstein, Michael Stonebraker",
+        "license": "CC BY-NC-ND",
+        "header": True,
+        "footer": True,
+    },
+}
 
 # Dictionnaire : nom technique d'une lettre -> vraie lettre
 SPECIAL_CHARS = {
@@ -31,8 +59,8 @@ def clean_text(text):
     # Recoller les mots coupés : "applica-\ntions" -> "applications"
     text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
 
-    # Supprimer le pied de page "BDSQL1 2"
-    text = re.sub(r"BDSQL1\s+\d+\s*$", "", text)
+    # Supprimer le pied de page "BDSQL1 2" ou "BDSQL1 VII"
+    text = re.sub(r"BDSQL1\s+[0-9IVXLC]+\s*$", "", text)
 
     return text
 
@@ -49,8 +77,16 @@ def load_pdf(path):
     return pages
 
 
+def strip_page_number(text):
+    """Retire une dernière ligne qui n'est qu'un numéro de page ("21", "21 | Chapitre 3", "Chapitre 3 | 21")."""
+    lines = text.rstrip().split("\n")
+    if lines and re.fullmatch(r"\s*(\d+(\s*\|.*)?|.*\|\s*\d+)\s*", lines[-1]):
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
 def split_pages(pages, chunk_size=1000, overlap=150):
-    """Découpe chaque page en morceaux (chunks), en gardant le numéro de page."""
+    """Ancien découpage : chaque page en morceaux, en gardant le numéro de page."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=overlap,
@@ -60,6 +96,8 @@ def split_pages(pages, chunk_size=1000, overlap=150):
         for piece in splitter.split_text(p["text"]):
             chunks.append({"page": p["page"], "text": piece})
     return chunks
+
+
 def get_outline(reader):
     """Renvoie les signets du PDF : liste de (niveau, titre, page)."""
     entries = []
@@ -100,21 +138,25 @@ def split_subsections(section):
     return parts
 
 
-def split_sections(path, chunk_size=1000, overlap=150):
-    """Découpe le PDF selon ses sections, avec le titre recopié en tête de chaque chunk."""
+def split_sections(path, chunk_size=1000, overlap=150, source="Document", header=True, footer=False):
+    """Découpe un PDF selon ses sections, avec le titre recopié en tête de chaque chunk.
+    source : titre court du document ; header / footer : retirer l'en-tête et le numéro de page."""
     reader = PdfReader(path)
     outline = get_outline(reader)
     pages = load_pdf(path)
     if not outline:  # PDF sans signets : on garde le découpage par page
-        return split_pages(pages, chunk_size, overlap)
+        return [dict(c, section="", source=source) for c in split_pages(pages, chunk_size, overlap)]
 
     # 1. Texte complet sans les en-têtes de page, en notant où commence chaque page
     full_text = ""
     page_starts = []
     for p in pages:
-        lines = p["text"].split("\n")
+        text = strip_page_number(p["text"]) if footer else p["text"]
+        lines = text.split("\n")
+        if header:
+            lines = lines[1:]   # la 1re ligne est l'en-tête de page
         page_starts.append((len(full_text), p["page"]))
-        full_text += "\n".join(lines[1:]) + "\n"   # la 1re ligne est l'en-tête de page
+        full_text += "\n".join(lines) + "\n"
 
     def page_at(pos):
         """Numéro de la page qui contient la position pos."""
@@ -125,7 +167,7 @@ def split_sections(path, chunk_size=1000, overlap=150):
         return next((start for start, n in page_starts if n >= num), len(full_text))
 
     # 2. Position de chaque titre de section, grâce aux signets du PDF
-    markers = [(0, "Début du document")]
+    entries = []  # (position, niveau, chemin des titres)
     titles = []
     cursor = 0
     for level, title, page in outline:
@@ -134,7 +176,18 @@ def split_sections(path, chunk_size=1000, overlap=150):
         pos = find_title(full_text, title, start)
         pos = start if pos == -1 else full_text.rfind("\n", 0, pos) + 1
         cursor = max(pos, cursor)
-        markers.append((cursor, " > ".join(titles)))
+        entries.append([cursor, level, list(titles)])
+
+    # Un signet sans contenu suivi d'un signet de même niveau (ex. "Chapter 11 ..." puis le nom de l'auteur) :
+    # le second garde le titre du premier, pour que les chunks portent le vrai titre du chapitre
+    bounds = [e[0] for e in entries[1:]] + [len(full_text)]
+    for i in range(len(entries) - 1):
+        body = full_text[entries[i][0]:bounds[i]].split("\n", 1)
+        empty = len(body) < 2 or len(body[1].strip()) < 30
+        if empty and entries[i + 1][1] == entries[i][1]:
+            entries[i + 1][2] = entries[i + 1][2][:-1] + [entries[i][2][-1]]
+
+    markers = [(0, "Début du document")] + [(pos, " > ".join(t)) for pos, _, t in entries]
     markers.append((len(full_text), None))
 
     # 3. Découpage de chaque section (et sous-section), titre en tête de chaque chunk
@@ -152,13 +205,28 @@ def split_sections(path, chunk_size=1000, overlap=150):
                 chunks.append({
                     "page": page_at(pos),
                     "section": label,
-                    "text": f"Section : {label}\n{doc.page_content}",
+                    "source": source,
+                    "text": f"{source} > {label}\n{doc.page_content}",
                 })
     return chunks
 
+
+def load_corpus(folder="data"):
+    """Découpe tous les PDF du dossier, avec les réglages du catalogue DOCUMENTS."""
+    chunks = []
+    for path in sorted(Path(folder).glob("*.pdf")):
+        info = DOCUMENTS.get(path.name, {"title": path.stem, "header": False, "footer": True})
+        doc_chunks = split_sections(
+            str(path), source=info["title"], header=info["header"], footer=info["footer"]
+        )
+        print(f"{info['title']} : {len(doc_chunks)} chunks")
+        chunks += doc_chunks
+    return chunks
+
+
 if __name__ == "__main__":
-    chunks = split_sections("data/test.pdf")
-    print(f"{len(chunks)} chunks")
-    print("--- Exemple : chunk n°20 ---")
+    chunks = load_corpus("data")
+    print(f"Total : {len(chunks)} chunks")
+    print("--- Exemple ---")
     print(f"(page {chunks[20]['page']})")
-    print(chunks[20]["text"])
+    print(chunks[20]["text"][:500])

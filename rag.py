@@ -7,19 +7,22 @@ load_dotenv()
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
-PROMPT = """Tu es un assistant pédagogique qui répond à des questions sur un cours de bases de données et de SQL.
+REFUS = "Je ne trouve pas la réponse dans les documents"
+
+PROMPT = """Tu es un assistant pédagogique expert en bases de données et en SQL.
+Tu réponds en français, même si les extraits sont en anglais.
 
 Règles (elles passent avant tout le reste) :
 - Réponds uniquement à partir des extraits ci-dessous, sans ajouter de connaissances extérieures.
 - N'écris jamais de code SQL qui n'apparaît pas dans les extraits. Si tu montres du code, recopie-le tel quel depuis les extraits.
-- Cite les pages utilisées sous la forme (p. X), uniquement pour des informations qui figurent réellement sur ces pages.
+- Cite tes sources sous la forme (Titre du document, p. X), en reprenant exactement le titre indiqué entre crochets avant chaque extrait, et uniquement pour des informations qui figurent réellement sur ces pages.
 - Si les extraits ne contiennent qu'une partie de la réponse, donne cette partie et précise ce qui manque.
-- Si les extraits ne contiennent rien d'utile pour répondre, réponds uniquement : "Je ne trouve pas la réponse dans le cours."
+- Si les extraits ne contiennent rien d'utile pour répondre, réponds uniquement : "Je ne trouve pas la réponse dans les documents."
 
 Niveau de la personne et façon de répondre :
 {level_instruction}
 
-Extraits du cours :
+Extraits des documents :
 {context}
 
 Question : {question}
@@ -68,7 +71,13 @@ def all_chunks():
     if _ALL_CHUNKS is None:
         data = get_collection().get(include=["documents", "metadatas"])
         chunks = [
-            {"id": int(i.split("-")[1]), "page": m["page"], "section": m.get("section", ""), "text": d}
+            {
+                "id": int(i.split("-")[1]),
+                "page": m["page"],
+                "source": m.get("source", ""),
+                "section": m.get("section", ""),
+                "text": d,
+            }
             for i, d, m in zip(data["ids"], data["documents"], data["metadatas"])
         ]
         _ALL_CHUNKS = sorted(chunks, key=lambda c: c["id"])
@@ -81,9 +90,10 @@ def expand_sections(hits, max_chars=8000, max_section_chars=6000):
     chunks = all_chunks()
     result, seen, total = [], set(), 0
     for h in hits:
-        label = h.get("section", "")
-        same = [c for c in chunks if label and c["section"] == label]
-        subtree = [c for c in chunks if label and (c["section"] == label or c["section"].startswith(label + " > "))]
+        label, source = h.get("section", ""), h.get("source", "")
+        doc = [c for c in chunks if c["source"] == source]
+        same = [c for c in doc if label and c["section"] == label]
+        subtree = [c for c in doc if label and (c["section"] == label or c["section"].startswith(label + " > "))]
         # Section avec ses sous-sections si elle reste raisonnable, sinon la section seule
         if subtree and sum(len(c["text"]) for c in subtree) <= max_section_chars:
             group = subtree
@@ -102,7 +112,7 @@ def expand_sections(hits, max_chars=8000, max_section_chars=6000):
 
 def build_context(hits):
     """Assemble les chunks trouvés en un seul texte, avec leur numéro de page."""
-    return "\n\n".join(f"[Page {h['page']}]\n{h['text']}" for h in hits)
+    return "\n\n".join(f"[{h['source']}, page {h['page']}]\n{h['text']}" for h in hits)
 
 
 def rewrite_question(question, history):
@@ -117,12 +127,19 @@ def rewrite_question(question, history):
     return llm.invoke(prompt).content.strip()
 
 
-def cited_pages(reply):
-    """Renvoie l'ensemble des numéros de page cités dans la réponse, ex. (p. 81) ou (p. 97, 98)."""
-    pages = set()
-    for group in re.findall(r"\(p\.\s*([\d\s,et\-–p.]+)\)", reply):
-        pages.update(int(n) for n in re.findall(r"\d+", group))
-    return pages
+def cited_sources(reply):
+    """Renvoie les couples (titre, page) cités dans la réponse, ex. (Database Design, p. 74)."""
+    cited = set()
+    for title, pages in re.findall(r"\(([^()]+?),\s*p\.\s*([\d\s,et\-–p.]+)\)", reply):
+        for n in re.findall(r"\d+", pages):
+            cited.add((title.strip(), int(n)))
+    return cited
+
+
+def keep_cited(hits, reply):
+    """Ne garde que les passages réellement cités dans la réponse."""
+    cited = cited_sources(reply)
+    return [h for h in hits if (h["source"], h["page"]) in cited]
 
 
 def answer(question, k=3, history=None, level="Intermédiaire"):
@@ -143,4 +160,4 @@ if __name__ == "__main__":
     reply, hits = answer(question)
     print(f"Question : {question}\n")
     print(reply)
-    print("\nPages citées :", sorted(cited_pages(reply)))
+    print("\nSources citées :", sorted(cited_sources(reply)))

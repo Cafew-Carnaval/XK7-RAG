@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 import chromadb
 from langchain_openai import OpenAIEmbeddings
-from loader import split_sections
+from loader import load_corpus
 
 load_dotenv()
 
@@ -17,11 +17,13 @@ def get_collection():
     return client.get_or_create_collection(COLLECTION)
 
 
-def build_index(pdf_path):
-    """Découpe le PDF par sections, calcule les embeddings et reconstruit la base ChromaDB."""
-    chunks = split_sections(pdf_path)
+def build_index(folder="data"):
+    """Découpe tous les PDF du dossier, calcule les embeddings et reconstruit la base ChromaDB."""
+    chunks = load_corpus(folder)
     texts = [c["text"] for c in chunks]
-    vectors = embedder.embed_documents(texts)   # appel à OpenAI
+    vectors = []
+    for i in range(0, len(texts), 500):   # par paquets, pour les gros corpus
+        vectors += embedder.embed_documents(texts[i:i + 500])   # appel à OpenAI
 
     client = chromadb.PersistentClient(path=DB_PATH)
     try:
@@ -34,7 +36,7 @@ def build_index(pdf_path):
         documents=texts,
         embeddings=vectors,
         metadatas=[
-            {"page": c["page"], "section": c["section"], "source": pdf_path} for c in chunks
+            {"page": c["page"], "section": c["section"], "source": c["source"]} for c in chunks
         ],
     )
     return len(chunks)
@@ -52,6 +54,7 @@ def search(question, k=3):
     ):
         hits.append({
             "page": meta["page"],
+            "source": meta.get("source", ""),
             "section": meta.get("section", ""),
             "text": text,
             "distance": dist,
@@ -60,12 +63,12 @@ def search(question, k=3):
 
 
 if __name__ == "__main__":
-    n = build_index("data/test.pdf")
+    n = build_index("data")
     print(f"{n} chunks indexés dans ChromaDB")
 
     question = "C'est quoi l'intégrité référentielle ?"
     print(f"\nQuestion : {question}\n")
     for h in search(question):
-        print(f"--- page {h['page']} (distance {h['distance']:.3f}) ---")
+        print(f"--- {h['source']}, page {h['page']} (distance {h['distance']:.3f}) ---")
         print(h["text"][:300])
         print()

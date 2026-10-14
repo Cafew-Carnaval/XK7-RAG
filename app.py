@@ -1,12 +1,11 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
-from rag import answer, cited_pages, LEVELS
+from rag import answer, keep_cited, LEVELS, REFUS
 
 load_dotenv()
 
 MAX_QUESTIONS = 20  # nombre maximum de questions par visite
-REFUS = "Je ne trouve pas la réponse dans le cours"
 AVATARS = {
     "user": ":material/person:",
     "assistant": ":material/database:",
@@ -38,10 +37,9 @@ def show_sources(sources):
     with st.expander(f"Sources ({len(sources)})"):
         for h in sources:
             text = h["text"]
-            if text.startswith("Section :"):  # on retire la ligne de titre ajoutée au découpage
-                text = text.split("\n", 1)[1] if "\n" in text else ""
+            text = text.split("\n", 1)[1] if "\n" in text else ""   # retire la ligne de titre du chunk
             section = " > ".join(h.get("section", "").split(" > ")[-2:])
-            st.markdown(f"**{section}** · page {h['page']}")
+            st.markdown(f"**{h.get('source', '')}** · {section} · page {h['page']}")
             st.caption(text[:600] + ("…" if len(text) > 600 else ""))
 
 
@@ -61,24 +59,28 @@ with st.sidebar:
         list(LEVELS),
         index=1,
         captions=["Grand public", "Bac+1 à bac+5", "Bac+6 et plus"],
-        help="Adapte la façon d'expliquer : même réponse, plus ou moins vulgarisée. Les informations viennent toujours du cours.",
+        help="Adapte la façon d'expliquer : même réponse, plus ou moins vulgarisée. Les informations viennent toujours des documents.",
     )
     k = st.slider(
         "Nombre de passages consultés",
         1, 10, 3,
-        help="Nombre d'extraits du cours que l'assistant lit avant de répondre.",
+        help="Nombre d'extraits que l'assistant recherche avant de répondre.",
     )
     st.caption(
         "Peu de passages (1 à 3) : réponse plus ciblée. "
-        "Plus de passages (5 à 10) : utile si la réponse est répartie sur plusieurs parties du cours. "
+        "Plus de passages (5 à 10) : utile si la réponse est répartie sur plusieurs parties des documents. "
         "Si l'assistant ne trouve pas, augmente ce nombre ou reformule ta question."
     )
 
     st.divider()
     st.subheader("À propos")
     st.caption(
-        "XK7-RAG répond à partir d'un cours sur les bases de données et SQL. "
-        "Chaque réponse cite ses pages, et l'assistant dit quand il ne sait pas plutôt que d'inventer."
+        "XK7-RAG répond à partir d'une bibliothèque d'ouvrages sur les bases de données. "
+        "Chaque réponse cite ses sources, et l'assistant dit quand il ne sait pas plutôt que d'inventer."
+    )
+    st.caption(
+        "Sources : un cours universitaire de SQL ; Database Design, A. Watt et N. Eng (CC BY 4.0) ; "
+        "Readings in Database Systems, P. Bailis, J. M. Hellerstein et M. Stonebraker (CC BY-NC-ND)."
     )
     
 
@@ -86,9 +88,9 @@ with st.sidebar:
 st.title("XK7-RAG")
 if not st.session_state["messages"]:
     st.markdown(
-        "Pose une question sur les bases de données et le langage SQL. "
-        "L'assistant cherche les passages pertinents dans le cours, puis rédige une réponse "
-        "en citant ses sources. Si l'information n'est pas dans le cours, il te le dit."
+        "Pose une question sur les bases de données et le langage SQL, du niveau débutant au niveau expert. "
+        "L'assistant cherche les passages pertinents dans sa bibliothèque d'ouvrages, puis rédige une réponse "
+        "en citant ses sources. Si l'information n'y est pas, il te le dit."
     )
 
 # --- Historique de la conversation
@@ -111,15 +113,11 @@ if question := st.chat_input("Pose ta question..."):
         st.markdown(question)
 
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
-        with st.spinner("Recherche dans le cours..."):
+        with st.spinner("Recherche dans les documents..."):
             reply, hits = answer(question, k=k, history=history, level=level)
 
         # On ne garde que les passages réellement cités dans la réponse
-        if REFUS in reply:
-            sources = []
-        else:
-            pages = cited_pages(reply)
-            sources = [h for h in hits if h["page"] in pages]
+        sources = [] if REFUS in reply else keep_cited(hits, reply)
 
         st.markdown(reply)
         show_sources(sources)
