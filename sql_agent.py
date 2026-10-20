@@ -43,6 +43,9 @@ Règles :
 - Pour "jamais", "aucun", "n'a pas", "sans" : exclus tous ceux qui ont AU MOINS UNE fois la propriété,
   avec NOT EXISTS ou NOT IN sur une sous-requête. Un simple <> ou une jointure externe filtrée ne suffit pas :
   quelqu'un qui a acheté un produit A ET un produit B a quand même acheté A.
+- Compare toujours des valeurs de même niveau : pour comparer le total d'un client (ou d'un produit,
+  d'un pays...) à "la moyenne", calcule la moyenne de ces mêmes totaux (d'abord un total par client,
+  puis la moyenne de ces totaux), et non la moyenne des lignes de détail.
 - Pour un type ou une famille (ex. "les produits bio", "les films d'action"), filtre de préférence sur une colonne de
   catégorie ou de genre si elle existe, plutôt que sur un mot dans un nom de produit.
 - Donne des noms de colonnes lisibles avec AS.

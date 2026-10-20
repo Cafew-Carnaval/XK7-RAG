@@ -4,6 +4,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from rag import answer, keep_cited, LEVELS, REFUS
 from sql_agent import ask, MAX_ROWS
+from core import run
 from sql_schema import DB_PATH
 from data_upload import to_sqlite, delete_file, UploadError, MAX_SIZE_MB
 
@@ -15,9 +16,11 @@ AVATARS = {
     "assistant": ":material/database:",
 }
 AGENTS = {
+    "core": "XK7-CORE · Automatique",
     "rag": "XK7-RAG · Documentation",
     "sql": "XK7-SQL · Données",
 }
+ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "les_deux": "XK7-RAG puis XK7-SQL", "hors_sujet": "aucun agent"}
 
 st.set_page_config(page_title="XK7", page_icon=":material/database:")
 
@@ -73,6 +76,27 @@ def show_sql_result(msg, key):
         st.code(msg["sql"], language="sql")
 
 
+def show_message(msg, key):
+    """Affiche une réponse : choix de XK7-CORE, partie cours, partie données."""
+    if msg.get("route"):
+        st.caption(f":material/alt_route: XK7-CORE → {msg['route']}")
+    st.markdown(msg["content"])
+    show_sources(msg.get("sources", []))
+    show_sql_result(msg, key)
+
+
+def sql_message(result, db_label):
+    """Transforme un résultat de XK7-SQL en message à afficher."""
+    if not result["ok"]:
+        return {"content": result["message"]}
+    n = len(result["rows"])
+    content = f"{result['explanation']}\n\n*Base : {db_label} · {n} ligne{'s' if n > 1 else ''}*"
+    if result.get("warning"):
+        content += f"\n\n**{result['warning']}**"
+    return {"content": content, "sql": result["sql"], "columns": result["columns"],
+            "rows": result["rows"], "truncated": result["truncated"]}
+
+
 def reset_upload():
     """Supprime le fichier temporaire de l'utilisateur."""
     if st.session_state["upload"]:
@@ -92,13 +116,15 @@ with st.sidebar:
     st.divider()
     agent = st.radio(
         "Agent", list(AGENTS), format_func=AGENTS.get,
-        captions=["Questions de cours et de documentation", "Questions sur une base de données"],
+        captions=["Choisit seul le bon agent", "Questions de cours et de documentation",
+                  "Questions sur une base de données"],
     )
 
     st.divider()
     st.subheader("Réglages")
     db_path, db_label = DB_PATH, "Chinook (démonstration)"
-    if agent == "rag":
+    level, k = "Intermédiaire", 3
+    if agent in ("core", "rag"):
         level = st.radio(
             "Niveau des réponses",
             list(LEVELS),
@@ -117,7 +143,7 @@ with st.sidebar:
             "Plus de passages (5 à 10) : utile si la réponse est répartie sur plusieurs parties des documents. "
             "Si l'assistant ne trouve pas, augmente ce nombre ou reformule ta question."
         )
-    else:
+    if agent in ("core", "sql"):
         source = st.radio("Base interrogée", ["Base de démonstration", "Mon fichier"],
                           captions=["Chinook : une boutique de musique en ligne", "CSV, Excel ou SQLite"])
         if source == "Mon fichier":
@@ -149,9 +175,9 @@ with st.sidebar:
     st.divider()
     st.subheader("À propos")
     st.caption(
-        "XK7 regroupe des agents IA spécialisés. XK7-RAG répond à partir d'une bibliothèque d'ouvrages "
-        "sur les bases de données, en citant ses sources. XK7-SQL interroge une base de données en "
-        "écrivant lui-même les requêtes SQL."
+        "XK7 regroupe des agents IA spécialisés. XK7-CORE lit la question et choisit le bon agent, ou les "
+        "enchaîne. XK7-RAG répond à partir d'une bibliothèque d'ouvrages sur les bases de données, en citant "
+        "ses sources. XK7-SQL interroge une base de données en écrivant lui-même les requêtes SQL."
     )
     st.caption(
         "Sources : un cours universitaire de SQL ; Database Design, A. Watt et N. Eng (CC BY 4.0) ; "
@@ -163,7 +189,14 @@ with st.sidebar:
 # --- Écran d'accueil
 st.title(AGENTS[agent])
 if not st.session_state["messages"]:
-    if agent == "rag":
+    if agent == "core":
+        st.markdown(
+            "Pose ta question : XK7-CORE choisit l'agent qui doit répondre. Une question de cours "
+            "(*C'est quoi une jointure externe ?*) va à XK7-RAG, une question sur les données "
+            "(*Quel genre musical se vend le mieux ?*) va à XK7-SQL, et une question qui demande les deux "
+            "(*Explique le GROUP BY, puis donne le chiffre d'affaires par pays*) est découpée et envoyée aux deux."
+        )
+    elif agent == "rag":
         st.markdown(
             "Pose une question sur les bases de données et le langage SQL, du niveau débutant au niveau expert. "
             "L'assistant cherche les passages pertinents dans sa bibliothèque d'ouvrages, puis rédige une réponse "
@@ -179,13 +212,15 @@ if not st.session_state["messages"]:
 # --- Historique de la conversation
 for i, msg in enumerate(st.session_state["messages"]):
     with st.chat_message(msg["role"], avatar=AVATARS[msg["role"]]):
-        st.markdown(msg["content"])
         if msg["role"] == "assistant":
-            show_sources(msg.get("sources", []))
-            show_sql_result(msg, i)
+            show_message(msg, i)
+            for j, part in enumerate(msg.get("parts", [])):
+                show_message(part, f"{i}_{j}")
+        else:
+            st.markdown(msg["content"])
 
 # --- Nouvelle question
-if agent == "sql" and db_path is None:
+if agent in ("core", "sql") and db_path is None:
     st.info("Dépose un fichier dans la barre latérale pour commencer.")
 elif question := st.chat_input("Pose ta question..."):
     if st.session_state["nb_questions"] >= MAX_QUESTIONS:
@@ -193,35 +228,55 @@ elif question := st.chat_input("Pose ta question..."):
         st.stop()
     st.session_state["nb_questions"] += 1
 
+    previous = list(st.session_state["messages"])
     # L'historique donné à XK7-RAG ne contient que ses propres échanges
-    history = [m for m in st.session_state["messages"] if m.get("agent", "rag") == "rag"]
+    history = [m for m in previous if m.get("agent", "rag") == "rag"]
     st.session_state["messages"].append({"role": "user", "content": question, "agent": agent})
     with st.chat_message("user", avatar=AVATARS["user"]):
         st.markdown(question)
 
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
-        if agent == "rag":
+        if agent == "core":
+            with st.spinner("XK7-CORE choisit l'agent..."):
+                result = run(question, previous, db_path, level, k)
+            chosen = result["agent"]
+            route_text = ROUTE_LABELS[chosen] + (f" · {result['reason']}" if result.get("reason") else "")
+            standalone = result.get("standalone", question)
+            if standalone.strip() != question.strip() and chosen != "les_deux":
+                route_text += f"  \nQuestion comprise : *{standalone}*"
+            if chosen == "les_deux":
+                route_text += (f"  \nPartie cours : *{result['rag_question']}*  \n"
+                               f"Partie données : *{result['sql_question']}*")
+                if not result.get("split_ok"):
+                    route_text += "  \nDécoupage incomplet : la question entière a été utilisée pour une partie."
+            parts = []
+            if result.get("rag"):
+                reply = result["rag"]["reply"]
+                sources = [] if REFUS in reply else keep_cited(result["rag"]["hits"], reply)
+                parts.append({"content": reply, "sources": sources})
+            if result.get("sql"):
+                parts.append(sql_message(result["sql"], db_label))
+            if result.get("message"):
+                parts.append({"content": result["message"]})
+            new_msg = {"role": "assistant", "agent": chosen, **parts[0], "route": route_text,
+                       "parts": parts[1:]}
+            # Pour la mémoire de XK7-RAG : la question de l'utilisateur prend l'agent choisi
+            st.session_state["messages"][-1]["agent"] = chosen
+            key = len(st.session_state["messages"])
+            show_message(new_msg, key)
+            for j, part in enumerate(new_msg["parts"]):
+                show_message(part, f"{key}_{j}")
+        elif agent == "rag":
             with st.spinner("Recherche dans les documents..."):
                 reply, hits = answer(question, k=k, history=history, level=level)
             # On ne garde que les passages réellement cités dans la réponse
             sources = [] if REFUS in reply else keep_cited(hits, reply)
-            st.markdown(reply)
-            show_sources(sources)
             new_msg = {"role": "assistant", "agent": "rag", "content": reply, "sources": sources}
+            show_message(new_msg, len(st.session_state["messages"]))
         else:
             with st.spinner("Écriture et exécution de la requête..."):
                 result = ask(question, db_path)
-            if result["ok"]:
-                n = len(result["rows"])
-                content = f"{result['explanation']}\n\n*Base : {db_label} · {n} ligne{'s' if n > 1 else ''}*"
-                if result.get("warning"):
-                    content += f"\n\n**{result['warning']}**"
-                new_msg = {"role": "assistant", "agent": "sql", "content": content, "sql": result["sql"],
-                           "columns": result["columns"], "rows": result["rows"],
-                           "truncated": result["truncated"]}
-            else:
-                new_msg = {"role": "assistant", "agent": "sql", "content": result["message"]}
-            st.markdown(new_msg["content"])
-            show_sql_result(new_msg, len(st.session_state["messages"]))
+            new_msg = {"role": "assistant", "agent": "sql", **sql_message(result, db_label)}
+            show_message(new_msg, len(st.session_state["messages"]))
 
     st.session_state["messages"].append(new_msg)
