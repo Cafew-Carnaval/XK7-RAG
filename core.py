@@ -13,7 +13,8 @@ split_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0,
                        model_kwargs={"response_format": {"type": "json_object"}})
 
 OFF_TOPIC_MESSAGE = ("Je ne peux pas répondre : XK7 est spécialisé dans les bases de données et le SQL. "
-                     "Je peux expliquer une notion de cours ou interroger la base de données.")
+                     "Tu peux me poser une question de cours, par exemple « C'est quoi une jointure externe ? », "
+                     "ou une question sur les données, par exemple « Quels sont les 5 clients qui ont le plus dépensé ? ».")
 
 SPLIT_PROMPT = """La question suivante contient deux demandes : une explication de cours sur les bases de données
 ou le SQL, et une demande de résultat tiré d'une base de données.
