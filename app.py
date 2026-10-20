@@ -16,9 +16,23 @@ AVATARS = {
     "assistant": ":material/database:",
 }
 AGENTS = {
-    "core": "XK7-CORE · Automatique",
-    "rag": "XK7-RAG · Documentation",
-    "sql": "XK7-SQL · Données",
+    "core": "Automatique",
+    "rag": "Documentation",
+    "sql": "Données",
+}
+# Exemples cliquables sur l'écran d'accueil
+EXAMPLES = {
+    "core": ["C'est quoi une jointure externe ?", "Quel genre musical se vend le mieux ?",
+             "Explique le GROUP BY, puis donne le chiffre d'affaires par pays."],
+    "rag": ["C'est quoi une jointure externe ?", "Quelles sont les règles de la deuxième forme normale ?",
+            "À quoi sert un index partiel ?"],
+    "sql": ["Quel genre musical se vend le mieux ?", "Quels sont les 5 clients qui ont le plus dépensé ?",
+            "Quels employés n'ont aucun client ?"],
+}
+WELCOME = {
+    "core": "Pose une question de cours ou sur les données : le bon agent répond.",
+    "rag": "Pose une question de cours sur les bases de données et le SQL.",
+    "sql": "Pose une question sur les données : la requête SQL est écrite et exécutée pour toi.",
 }
 ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "les_deux": "XK7-RAG puis XK7-SQL", "hors_sujet": "aucun agent"}
 
@@ -106,8 +120,7 @@ def reset_upload():
 
 # --- Barre latérale
 with st.sidebar:
-    st.title("XK7")
-    st.caption("Assistant IA pour les données et la documentation")
+    st.caption("XK7 · Assistant IA pour les données")
 
     if st.button("Nouvelle conversation", icon=":material/add:", width="stretch"):
         st.session_state["messages"] = []
@@ -116,8 +129,8 @@ with st.sidebar:
     st.divider()
     agent = st.radio(
         "Agent", list(AGENTS), format_func=AGENTS.get,
-        captions=["Choisit seul le bon agent", "Questions de cours et de documentation",
-                  "Questions sur une base de données"],
+        help="Automatique : XK7-CORE choisit l'agent. Documentation : XK7-RAG répond avec les ouvrages. "
+             "Données : XK7-SQL interroge la base.",
     )
 
     st.divider()
@@ -136,12 +149,8 @@ with st.sidebar:
         k = st.slider(
             "Nombre de passages consultés",
             1, 10, 3,
-            help="Nombre d'extraits que l'assistant recherche avant de répondre.",
-        )
-        st.caption(
-            "Peu de passages (1 à 3) : réponse plus ciblée. "
-            "Plus de passages (5 à 10) : utile si la réponse est répartie sur plusieurs parties des documents. "
-            "Si l'assistant ne trouve pas, augmente ce nombre ou reformule ta question."
+            help="Nombre d'extraits lus avant de répondre. 1 à 3 : réponse ciblée. 5 à 10 : utile si la "
+                 "réponse est répartie dans les documents, ou si l'assistant ne trouve pas.",
         )
     if agent in ("core", "sql"):
         source = st.radio("Base interrogée", ["Base de démonstration", "Mon fichier"],
@@ -166,48 +175,35 @@ with st.sidebar:
                 else:
                     db_path = None
         st.caption(
-            "Mode confidentiel : seule la structure de la base (noms des tables et des colonnes) est envoyée "
-            "au modèle. Les données et les résultats restent ici. Le fichier déposé est temporaire et "
-            "n'est jamais conservé. Évite tout de même les noms de colonnes sensibles."
+            ":material/lock: Confidentiel et en lecture seule",
+            help="Seule la structure de la base (noms des tables et des colonnes) est envoyée au modèle : "
+                 "les données et les résultats restent ici. Le fichier déposé est temporaire et n'est jamais "
+                 "conservé. XK7-SQL ne peut ni modifier ni supprimer de données.",
         )
-        st.caption("Lecture seule : XK7-SQL ne peut ni modifier ni supprimer de données.")
 
     st.divider()
-    st.subheader("À propos")
-    st.caption(
-        "XK7 regroupe des agents IA spécialisés. XK7-CORE lit la question et choisit le bon agent, ou les "
-        "enchaîne. XK7-RAG répond à partir d'une bibliothèque d'ouvrages sur les bases de données, en citant "
-        "ses sources. XK7-SQL interroge une base de données en écrivant lui-même les requêtes SQL."
-    )
-    st.caption(
-        "Sources : un cours universitaire de SQL ; Database Design, A. Watt et N. Eng (CC BY 4.0) ; "
-        "Documentation de PostgreSQL 18, The PostgreSQL Global Development Group (licence PostgreSQL) ; "
-        "Readings in Database Systems, P. Bailis, J. M. Hellerstein et M. Stonebraker (CC BY-NC-ND) ; "
-        "base Chinook, L. Rocha (licence MIT)."
-    )
+    with st.expander("À propos"):
+        st.caption(
+            "XK7 regroupe des agents IA spécialisés. XK7-CORE lit la question et choisit le bon agent, ou les "
+            "enchaîne. XK7-RAG répond à partir d'une bibliothèque d'ouvrages sur les bases de données, en citant "
+            "ses sources. XK7-SQL interroge une base de données en écrivant lui-même les requêtes SQL."
+        )
+        st.caption(
+            "Sources : un cours universitaire de SQL ; Database Design, A. Watt et N. Eng (CC BY 4.0) ; "
+            "Documentation de PostgreSQL 18, The PostgreSQL Global Development Group (licence PostgreSQL) ; "
+            "Readings in Database Systems, P. Bailis, J. M. Hellerstein et M. Stonebraker (CC BY-NC-ND) ; "
+            "base Chinook, L. Rocha (licence MIT)."
+        )
 
 # --- Écran d'accueil
-st.title(AGENTS[agent])
+st.title("XK7")
+pending = None
 if not st.session_state["messages"]:
-    if agent == "core":
-        st.markdown(
-            "Pose ta question : XK7-CORE choisit l'agent qui doit répondre. Une question de cours "
-            "(*C'est quoi une jointure externe ?*) va à XK7-RAG, une question sur les données "
-            "(*Quel genre musical se vend le mieux ?*) va à XK7-SQL, et une question qui demande les deux "
-            "(*Explique le GROUP BY, puis donne le chiffre d'affaires par pays*) est découpée et envoyée aux deux."
-        )
-    elif agent == "rag":
-        st.markdown(
-            "Pose une question sur les bases de données et le langage SQL, du niveau débutant au niveau expert. "
-            "L'assistant cherche les passages pertinents dans sa bibliothèque d'ouvrages, puis rédige une réponse "
-            "en citant ses sources. Si l'information n'y est pas, il te le dit."
-        )
-    else:
-        st.markdown(
-            "Pose une question en français sur les données, par exemple : *Quels sont les 5 clients qui ont "
-            "le plus dépensé ?* ou *Quel est le genre musical le plus vendu ?* L'assistant écrit la requête SQL, "
-            "l'exécute et affiche le résultat. Tu peux aussi déposer ton propre fichier dans la barre latérale."
-        )
+    st.markdown(WELCOME[agent])
+    st.caption("Exemples :")
+    for i, example in enumerate(EXAMPLES[agent]):
+        if st.button(example, key=f"ex_{agent}_{i}", icon=":material/arrow_forward:"):
+            pending = example
 
 # --- Historique de la conversation
 for i, msg in enumerate(st.session_state["messages"]):
@@ -222,7 +218,7 @@ for i, msg in enumerate(st.session_state["messages"]):
 # --- Nouvelle question
 if agent in ("core", "sql") and db_path is None:
     st.info("Dépose un fichier dans la barre latérale pour commencer.")
-elif question := st.chat_input("Pose ta question..."):
+elif (question := st.chat_input("Pose ta question...") or pending):
     if st.session_state["nb_questions"] >= MAX_QUESTIONS:
         st.warning("Limite de questions atteinte pour cette visite.")
         st.stop()
@@ -280,3 +276,5 @@ elif question := st.chat_input("Pose ta question..."):
             show_message(new_msg, len(st.session_state["messages"]))
 
     st.session_state["messages"].append(new_msg)
+    if pending:
+        st.rerun()   # efface l'écran d'accueil après un exemple cliqué
