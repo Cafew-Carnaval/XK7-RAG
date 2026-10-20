@@ -1,9 +1,13 @@
 [theme]
-base = "light"
-primaryColor = "#E07A3F"
-backgroundColor = "#F7F1E8"
-secondaryBackgroundColor = "#EDE3D4"
-textColor = "#1D4E5F"
+# "Miami Vice" version XK7 : noir de nuit, orange coucher de soleil, texte rose
+base = "dark"
+primaryColor = "#FF8A3D"              # orange coucher de soleil : boutons, curseurs, éléments sélectionnés
+backgroundColor = "#0B0A10"           # noir légèrement violacé
+secondaryBackgroundColor = "#1A1420"  # barre latérale, zones de saisie, encadrés
+textColor = "#F5A3C7"                 # rose doux : texte principal (moins agressif que le blanc)
+linkColor = "#F4EEF2"                 # blanc cassé : liens
+codeTextColor = "#F4EEF2"             # blanc cassé : code SQL
+borderColor = "#3A2533"               # bordures discrètes, teintées de rose
 font = "sans serif"
 
 [browser]
