@@ -1,18 +1,18 @@
 # XK7
 
-Un assistant data multi-agent en construction. Chaque agent est spécialisé, et tous partagent les mêmes principes : réponses vérifiables, refus plutôt qu'invention, sécurité et confidentialité des données.
+Un assistant data multi-agent, déployé en ligne. Chaque agent est spécialisé, et tous partagent les mêmes principes : réponses vérifiables, refus plutôt qu'invention, sécurité et confidentialité des données.
 
 | Agent | Rôle | État |
 |---|---|---|
 | XK7-RAG | Répond aux questions sur les bases de données et le SQL à partir d'une bibliothèque d'ouvrages, en citant ses sources | Terminé |
 | XK7-SQL | Interroge une base de données en français : écrit la requête SQL, l'exécute en lecture seule et affiche le résultat, sans jamais montrer les données au modèle | Terminé |
 | XK7-ANALYSE | Calculs, tendances et graphiques à partir des résultats SQL | À venir |
-| XK7-QUALITE | Contrôle de la qualité des données (doublons, valeurs manquantes, incohérences) | À venir |
-| XK7-CORE | Agent chef (LangGraph) qui envoie chaque question au bon agent et les enchaîne | À venir |
+| XK7-QUALITE | Contrôle la qualité des données (doublons, valeurs manquantes, formats, liens cassés, règles métier) et propose un script de correction, sans jamais l'exécuter | Terminé |
+| XK7-CORE | Agent chef (LangGraph) qui envoie chaque question au bon agent, ou découpe une question mixte et enchaîne les deux | Terminé |
 
 ## Démo en ligne
 
-L'application est déployée sur Streamlit Community Cloud : https://xk7-rag.streamlit.app (XK7-RAG et XK7-SQL, au choix dans la barre latérale)
+L'application est déployée sur Streamlit Community Cloud : https://xk7-rag.streamlit.app (XK7-CORE choisit l'agent automatiquement ; chaque agent reste accessible seul)
 
 L'accès est protégé par un mot de passe (chaque question appelle l'API OpenAI, donc a un coût). Il est disponible sur demande.
 
@@ -21,6 +21,90 @@ L'accès est protégé par un mot de passe (chaque question appelle l'API OpenAI
 - Monter en compétence sur les technologies d'IA générative les plus demandées : RAG, embeddings, bases vectorielles, LLM, évaluation, et bientôt les systèmes multi-agents.
 - Répondre à un besoin réel : retrouver vite une information fiable dans une documentation longue, sans relire des centaines de pages, et pouvoir vérifier la source.
 - Construire une brique réutilisable pour la suite du projet.
+
+## XK7-CORE : le chef d'orchestre
+
+XK7-CORE lit la question et décide qui doit répondre : XK7-RAG pour une question de cours ("C'est quoi une jointure externe ?"), XK7-SQL pour une question sur les données ("Quel genre musical se vend le mieux ?"), XK7-QUALITE pour un contrôle ("Vérifie la qualité des données", "Regarde mon fichier"), les deux pour une question mixte ("Explique le GROUP BY, puis donne le chiffre d'affaires par pays"), ou personne pour une question hors sujet.
+
+Il est construit avec LangGraph, sous forme de graphe d'étapes :
+
+```mermaid
+flowchart LR
+    Q[Question] --> R[Routage]
+    R -->|cours| RAG[XK7-RAG]
+    R -->|données| SQL[XK7-SQL]
+    R -->|mixte| S[Découpage]
+    S --> RAG2[XK7-RAG] --> SQL2[XK7-SQL]
+    R -->|contrôle| QUAL[XK7-QUALITE]
+    R -->|hors sujet| H[Refus]
+```
+
+- Le routage utilise GPT-4o-mini (environ 1 seconde par décision). Il renvoie l'agent choisi, une raison, et la question réécrite pour être comprise seule ("Et ceux qui ont dépensé moins ?" devient "Trouve les clients qui ont dépensé moins que la moyenne"), car XK7-SQL n'a pas de mémoire de la conversation.
+- Une question mixte est découpée en une question de cours et une question sur les données, envoyées chacune à son agent. Les deux réponses sont affichées l'une sous l'autre, sans être fusionnées par un modèle : le résultat de XK7-SQL n'est jamais montré à une IA.
+- Le routeur ne voit que la question, les questions précédentes, les noms des tables et le nom du fichier déposé. Jamais les réponses ni les données.
+- L'interface affiche le choix du chef, sa raison, la question comprise et le découpage, pour que chaque décision soit vérifiable.
+- Fichiers : `router.py` (routage et réécriture), `core.py` (graphe LangGraph et découpage), `eval_router_questions.py` et `evaluate_router.py` (évaluation).
+
+### Évaluation du routage
+
+34 questions : 7 de cours, 7 sur les données, 6 pièges ("Combien de types de jointures existe-t-il ?" est une question de cours malgré le "combien" ; "Comment écrire un UPDATE ?" aussi), 3 mixtes, 3 hors sujet, 2 questions de suivi et 6 questions ajoutées après les corrections du prompt.
+
+| Mesure | Résultat |
+|---|---|
+| Premier essai (28 questions) | 26/28 |
+| Après correction du prompt (34 questions) | 34/34 |
+| Après ajout de XK7-QUALITE et des fichiers déposés (47 questions) | 47/47 (14 cours, 15 données, 10 qualité, 4 mixtes, 4 hors sujet) |
+| Dont questions ajoutées après correction | 6/6 |
+| Temps moyen par décision | environ 1 s |
+
+Les 6 dernières questions ont été écrites après les corrections, pour vérifier que les nouvelles règles marchent en général et pas seulement sur les questions qui les ont fait naître (éviter le surapprentissage du prompt).
+
+### Ce que les tests de bout en bout ont révélé
+
+1. "Isolation faible" envoyée en hors sujet : sans contexte, le petit modèle ne reconnaissait pas le terme. Correction : sujets du RAG listés précisément, et règle de prudence (entre cours et hors sujet, choisir le cours : le RAG dira lui-même s'il ne trouve rien).
+2. Partie données d'une question mixte refusée : le modèle de découpage écrivait la clé "données" avec un accent au lieu de "donnees", le découpage échouait en silence. Correction : lecture tolérante des réponses du modèle, et découpage affiché dans l'interface.
+3. Le modèle de découpage répondait à la question de cours au lieu de la recopier. Correction : consigne avec un exemple, et garde-fou dans le code qui rejette une partie plus longue que la question entière.
+4. Question de suivi refusée par XK7-SQL, qui n'a pas d'historique. Correction : le routeur réécrit la question pour qu'elle soit autonome.
+5. "Clients qui ont dépensé plus que la moyenne" : un lancement comparait le total de chaque client à la moyenne d'une facture, et renvoyait les 59 clients. Correction : règle sur le niveau d'agrégation dans le prompt de XK7-SQL, et question ajoutée à son évaluation.
+
+Leçon commune : chaque appel à un modèle est un point où le système peut dérailler, même pour une tâche simple comme découper une phrase. Les réponses des modèles sont donc toujours vérifiées par le code.
+
+## XK7-QUALITE : le contrôle des données
+
+XK7-QUALITE contrôle une base (Chinook ou un fichier déposé) et rend un rapport avec un score par table, des exemples et un script de correction.
+
+### Ce qu'il contrôle
+
+| Contrôle | Exemple | Fait par |
+|---|---|---|
+| Valeurs manquantes | quelques emails vides dans une colonne presque toujours remplie | le code |
+| Doublons exacts | une commande saisie deux fois | le code |
+| Doublons approchés | "Élodie Martin" et "ELODIE MARTIN " | le code |
+| Formats | email invalide, code postal "750O1", "Lyon" / "LYON", espaces en trop | le code |
+| Valeurs aberrantes | quantité de -2, salaire mensuel de 48 000 € | le code |
+| Liens cassés | une commande d'un client qui n'existe pas | le code |
+| Règles métier | une commande avant l'inscription du client, une absence qui finit avant de commencer | GPT-4o, à partir de la structure seule |
+
+- Les contrôles sont faits en local, en environ une seconde, sans IA. L'agent devine seul les identifiants et les liens, même dans un Excel qui n'en déclare aucun.
+- Trois gravités : erreur, à vérifier, info (une colonne vide à 80 % est sans doute facultative).
+- Les règles métier sont écrites en SQL par GPT-4o à partir de la structure, puis passent par les barrières de sécurité de XK7-SQL. Une requête défaillante est réparée automatiquement (commentaires, apostrophes) ou renvoyée une fois au modèle avec le message d'erreur.
+
+### Les corrections : XK7 propose, l'humain décide
+
+Pour chaque problème, un conseil et, quand c'est sûr et mécanique, une instruction SQL (TRIM des espaces, harmonisation des écritures, suppression des doublons exacts). Le tout forme un script téléchargeable, dans une transaction annulable (BEGIN / COMMIT / ROLLBACK). Ce qui demande un jugement humain (fusionner deux fiches, corriger un salaire) reste en commentaire avec la requête pour retrouver les lignes. Le script est écrit par le code, et XK7 ne l'exécute jamais.
+
+### Évaluation
+
+Une boutique fictive en deux versions : une propre, et une copie avec 21 erreurs injectées volontairement (`make_quality_test.py`, `evaluate_quality.py`).
+
+| Mesure | Résultat |
+|---|---|
+| Erreurs retrouvées par les contrôles locaux | 19/21 (les 2 autres sont des règles métier) |
+| Erreurs retrouvées avec les règles métier de GPT-4o | 21/21 attendues (voir `evaluate_quality.py`) |
+| Fausses alertes sur la version propre | 0 |
+| Données envoyées au modèle | aucune |
+
+Test supplémentaire sur un fichier RH fictif jamais vu pendant le développement : les 15 erreurs cachées retrouvées, dont les 2 règles métier, pensées seules par le modèle. Sur Chinook, l'agent trouve de vrais défauts de cette base très connue : "Edinburgh " avec un espace en trop, "Dublin" dans la colonne des États, des playlists en double. Sur le fichier de test de XK7-SQL, il a trouvé 10 commandes passées avant l'inscription du client, une erreur réelle dans la génération de ce fichier.
 
 ## XK7-RAG : la documentation
 
@@ -43,7 +127,7 @@ Un assistant généraliste répond avec ce qu'il a appris pendant son entraînem
 - Répond en français, même quand la source est en anglais.
 - Cite ses sources sous la forme (Titre du document, p. X) et n'affiche sous la réponse que les passages réellement cités.
 - Refuse de répondre quand l'information n'est pas dans les documents, et donne une réponse partielle en précisant ce qui manque quand c'est le cas.
-- Adapte sa façon d'expliquer à trois niveaux : Débutant (grand public, avec des images de la vie courante), Intermédiaire (bac+1 à bac+5) et Expert (bac+6 et plus, définitions formelles et cas limites). Le contenu reste le même, seule la manière d'expliquer change.
+- Adapte sa façon d'expliquer à trois niveaux : Débutant (avec des images de la vie courante), Intermédiaire et Expert (définitions formelles et cas limites). Le contenu reste le même, seule la manière d'expliquer change.
 - Garde le fil de la conversation : une question de suivi comme "et pour rollback ?" est réécrite pour être comprise seule.
 - Ne recopie que du code SQL présent dans les documents, sans en inventer.
 
@@ -123,28 +207,42 @@ S'y ajoutent une limite de 5 secondes par requête et de 100 lignes par résulta
 
 ### Évaluation
 
-Le jeu de test compte 17 questions : 3 simples, 6 moyennes (classements, regroupements, filtres sur les dates), 4 difficiles (NOT IN, NOT EXISTS, table jointe à elle-même), 2 demandes de modification et 2 questions hors sujet.
+Le jeu de test compte 27 questions sur deux bases :
+
+- Chinook (18 questions) : 3 simples, 6 moyennes (classements, regroupements, filtres sur les dates), 5 difficiles (NOT IN, NOT EXISTS, table jointe à elle-même), 2 demandes de modification et 2 questions hors sujet.
+- Une base inconnue (9 questions) : un fichier Excel fictif (`data/ventes_cafe_test.xlsx`, une boutique de café et de thé) que le modèle n'a jamais pu voir. Il n'a aucun lien déclaré entre les onglets, des noms de colonnes en français avec espaces et accents, et un chiffre d'affaires à calculer (quantité × prix unitaire).
 
 L'évaluation compare les résultats, pas les requêtes : deux requêtes différentes qui donnent le même résultat sont toutes les deux justes. L'agent peut ajouter des colonnes ou présenter un nom en une seule colonne ; l'ordre ne compte que pour les classements.
 
 | Mesure | Résultat |
 |---|---|
-| Résultats justes | 13/13 |
-| Refus corrects (2 modifications, 2 hors sujet) | 4/4 |
+| Chinook : résultats justes | 14/14 |
+| Chinook : refus corrects (2 modifications, 2 hors sujet) | 4/4 |
+| Base inconnue : résultats justes | 9/9 |
 | Données de la base envoyées au modèle | aucune |
 
-Les résultats sont identiques avec et sans lignes d'exemple dans le prompt : sur ce jeu de test, le mode confidentiel ne coûte rien en qualité.
+Sur Chinook, les résultats sont identiques avec et sans lignes d'exemple dans le prompt.
+
+### Ce que la base inconnue a révélé
+
+Les premiers tests sur le fichier Excel ont fait apparaître deux erreurs que Chinook cachait, sur la question "Combien de clients n'ont jamais acheté de thé ?" (bonne réponse : 3).
+
+1. Réponse 30. Le prompt disait que les valeurs étaient "probablement en anglais", ce qui était vrai pour Chinook. Le modèle a filtré sur 'Tea', une valeur qui n'existe pas, et la requête a donné un résultat faux sans aucune erreur. Correction : la langue des valeurs est déduite de celle des colonnes, et surtout une vérification locale contrôle que chaque valeur utilisée comme filtre existe dans la base. Si ce n'est pas le cas, le modèle est prévenu ("'Tea' n'existe dans aucune colonne") et corrige. Seule sa propre valeur inventée lui est renvoyée, jamais une vraie donnée. Si la valeur reste introuvable, l'interface affiche un avertissement.
+2. Réponse 29. Le modèle a compté les clients ayant acheté au moins un produit qui n'est pas du thé, au lieu d'exclure ceux qui en ont acheté au moins une fois (le piège classique de la double négation), et il a filtré sur le nom des produits plutôt que sur leur catégorie. Correction : deux règles dans le prompt (NOT EXISTS ou NOT IN pour "jamais" ou "aucun", et filtrer de préférence sur une colonne de catégorie), écrites avec des exemples génériques pour ne pas souffler la réponse du test.
+
+Après ces corrections : 9/9 sur la base inconnue, sans régression sur Chinook.
 
 ### Limites
 
-- Chinook est une base très connue, utilisée dans de nombreux tutoriels : le modèle l'a probablement vue pendant son entraînement, ce qui l'aide à deviner des valeurs comme 'Rock' sans voir les données. Sur une base d'entreprise inconnue, aux noms de colonnes moins explicites, le score serait sans doute plus bas.
+- Chinook est une base très connue, que le modèle a probablement vue pendant son entraînement. C'est pour cela qu'une base inconnue a été ajoutée au jeu de test. Elle reste petite et ses noms de colonnes sont clairs : une vraie base d'entreprise (centaines de tables, noms abrégés) serait plus difficile.
+- Les règles ajoutées après les erreurs de la base inconnue ont été testées sur les questions qui les ont révélées : il faudrait d'autres bases inconnues pour mesurer leur effet en général.
 - Sans voir les données, le modèle peut se tromper sur une valeur exacte (une orthographe, une langue, un format de date). Le prompt compense par des règles (LIKE, strftime), mais pas dans tous les cas.
 - Même à température 0, la requête écrite peut varier d'un lancement à l'autre. C'est pour cela que l'évaluation porte sur les résultats.
 - Les questions ambiguës ("nos meilleurs clients", selon quel critère ?) ne sont pas encore testées.
 
 ## Technologies
 
-Python 3.12, LangChain, OpenAI (GPT-4o, GPT-4o-mini, text-embedding-3-small), ChromaDB, SQLite, pandas, Streamlit, pypdf.
+Python 3.12, LangChain, LangGraph, OpenAI (GPT-4o, GPT-4o-mini, text-embedding-3-small), ChromaDB, SQLite, pandas, Streamlit, pypdf.
 
 ## Installation
 
@@ -172,6 +270,10 @@ python vectorstore.py      # construit la base vectorielle
 streamlit run app.py       # lance l'interface sur http://localhost:8501
 python evaluate.py         # évaluation de XK7-RAG
 python evaluate_sql.py     # évaluation de XK7-SQL
+python evaluate_router.py  # évaluation du routage de XK7-CORE
+python evaluate_quality.py # évaluation de XK7-QUALITE (crée les fichiers de test si besoin)
+python quality_agent.py data/qualite_sale.xlsx   # rapport de qualité dans le terminal
+python core.py             # trois questions de démonstration dans le terminal
 python sql_agent.py        # tests de sécurité et quelques questions dans le terminal
 ```
 
@@ -229,8 +331,7 @@ Les deux points manquants sont des oublis, pas des erreurs : la réponse sur les
 
 ## Prochaines étapes
 
-- XK7-CORE : un agent chef avec LangGraph, qui envoie chaque question à XK7-RAG ou XK7-SQL et sait les enchaîner.
-- XK7-ANALYSE et XK7-QUALITE.
+- XK7-ANALYSE : tendances, comparaisons et graphiques, calculés en local.
 - Mode 100 % local avec Ollama, et tests de XK7-SQL sur des bases moins connues et des questions ambiguës.
 - Réduire le temps de réponse (appels en parallèle, cache, modèle plus léger pour certaines étapes).
 - Recherche hybride (sens et mots-clés) et reranking pour les documentations très denses.
