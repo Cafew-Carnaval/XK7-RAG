@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from rag import answer, keep_cited, LEVELS, REFUS
 from sql_agent import ask, MAX_ROWS
 from core import run
+from quality_agent import check_quality, summary as quality_summary
 from sql_schema import DB_PATH
 from data_upload import to_sqlite, delete_file, UploadError, MAX_SIZE_MB
 
@@ -19,6 +20,7 @@ AGENTS = {
     "core": "Automatique",
     "rag": "Documentation",
     "sql": "Données",
+    "qualite": "Qualité",
 }
 # Exemples cliquables sur l'écran d'accueil
 EXAMPLES = {
@@ -28,13 +30,18 @@ EXAMPLES = {
             "À quoi sert un index partiel ?"],
     "sql": ["Quel genre musical se vend le mieux ?", "Quels sont les 5 clients qui ont le plus dépensé ?",
             "Quels employés n'ont aucun client ?"],
+    "qualite": ["Vérifie la qualité des données.", "Y a-t-il des doublons dans les clients ?",
+                "Les données des factures sont-elles fiables ?"],
 }
 WELCOME = {
     "core": "Pose une question de cours ou sur les données : le bon agent répond.",
     "rag": "Pose une question de cours sur les bases de données et le SQL.",
     "sql": "Pose une question sur les données : la requête SQL est écrite et exécutée pour toi.",
+    "qualite": "Demande un contrôle : doublons, valeurs manquantes, formats, liens cassés, règles métier.",
 }
-ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "les_deux": "XK7-RAG puis XK7-SQL", "hors_sujet": "aucun agent"}
+ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "qualite": "XK7-QUALITE", "les_deux": "XK7-RAG puis XK7-SQL",
+                "hors_sujet": "aucun agent"}
+GRAVITY_ICONS = {"erreur": ":material/error:", "à vérifier": ":material/warning:", "info": ":material/info:"}
 
 st.set_page_config(page_title="XK7", page_icon=":material/database:")
 
@@ -97,6 +104,54 @@ def show_message(msg, key):
     st.markdown(msg["content"])
     show_sources(msg.get("sources", []))
     show_sql_result(msg, key)
+    show_quality(msg, key)
+
+
+def show_quality(msg, key):
+    """Affiche le rapport de XK7-QUALITE : un encadré par table, puis les règles métier."""
+    report = msg.get("quality")
+    if not report:
+        return
+    for table, r in sorted(report["tables"].items(), key=lambda x: x[1]["score"]):
+        problems = [p for p in r["problemes"]]
+        serious = [p for p in problems if p["gravite"] != "info"]
+        label = f"{table} · {r['score']}/100 · {len(serious)} problème{'s' if len(serious) > 1 else ''}"
+        with st.expander(label, icon=":material/table:", expanded=False):
+            if not problems:
+                st.caption("Aucun problème détecté.")
+            for p in problems:
+                col = f" · {p['colonne']}" if p.get("colonne") else ""
+                st.markdown(f"{GRAVITY_ICONS.get(p['gravite'], '')} **{p['type']}**{col} : {p['detail']}")
+                if p.get("exemples"):
+                    st.dataframe(pd.DataFrame(p["exemples"]), hide_index=True, width="stretch")
+                fix = p.get("correction")
+                if fix and p["gravite"] != "info":
+                    st.caption(f":material/build: {fix['conseil']}")
+                    if fix.get("sql") and not fix["sql"].lstrip().upper().startswith("SELECT"):
+                        st.code(fix["sql"], language="sql")
+    if report.get("script"):
+        with st.expander("Script de correction proposé", icon=":material/build:"):
+            st.caption("Écrit par le code à partir du rapport. XK7 ne l'exécute jamais : relis-le, puis lance-le "
+                       "toi-même sur une copie de la base. Les corrections sûres sont actives, les autres sont en "
+                       "commentaire avec un conseil.")
+            st.code(report["script"], language="sql")
+            st.download_button("Télécharger le script (.sql)", report["script"].encode("utf-8"),
+                               file_name="corrections_xk7.sql", mime="text/plain", key=f"fix_{key}",
+                               icon=":material/download:")
+    if report.get("regles"):
+        with st.expander("Règles métier proposées", icon=":material/rule:"):
+            for r in report["regles"]:
+                count = f" ({r['nb']} ligne{'s' if r.get('nb', 0) > 1 else ''})" if r.get("nb") else ""
+                st.markdown(f"- {r['regle']} : **{r['statut']}**{count}")
+                if r.get("sql"):
+                    st.code(r["sql"], language="sql")
+
+
+def quality_message(report, db_label):
+    """Transforme un rapport de XK7-QUALITE en message à afficher (résumé écrit par le code, sans IA)."""
+    text = quality_summary(report).replace("\n- ", "  \n- ")
+    return {"content": f"{text}\n\n*Base : {db_label} · contrôles faits en local, seules les règles métier "
+                       "sont proposées par le modèle à partir de la structure*", "quality": report}
 
 
 def sql_message(result, db_label):
@@ -130,7 +185,7 @@ with st.sidebar:
     agent = st.radio(
         "Agent", list(AGENTS), format_func=AGENTS.get,
         help="Automatique : XK7-CORE choisit l'agent. Documentation : XK7-RAG répond avec les ouvrages. "
-             "Données : XK7-SQL interroge la base.",
+             "Données : XK7-SQL interroge la base. Qualité : XK7-QUALITE contrôle les données.",
     )
 
     st.divider()
@@ -142,7 +197,6 @@ with st.sidebar:
             "Niveau des réponses",
             list(LEVELS),
             index=1,
-            captions=["Grand public", "Bac+1 à bac+5", "Bac+6 et plus"],
             help="Adapte la façon d'expliquer : même réponse, plus ou moins vulgarisée. "
                  "Les informations viennent toujours des documents.",
         )
@@ -152,7 +206,7 @@ with st.sidebar:
             help="Nombre d'extraits lus avant de répondre. 1 à 3 : réponse ciblée. 5 à 10 : utile si la "
                  "réponse est répartie dans les documents, ou si l'assistant ne trouve pas.",
         )
-    if agent in ("core", "sql"):
+    if agent in ("core", "sql", "qualite"):
         source = st.radio("Base interrogée", ["Base de démonstration", "Mon fichier"],
                           captions=["Chinook : une boutique de musique en ligne", "CSV, Excel ou SQLite"])
         if source == "Mon fichier":
@@ -186,7 +240,8 @@ with st.sidebar:
         st.caption(
             "XK7 regroupe des agents IA spécialisés. XK7-CORE lit la question et choisit le bon agent, ou les "
             "enchaîne. XK7-RAG répond à partir d'une bibliothèque d'ouvrages sur les bases de données, en citant "
-            "ses sources. XK7-SQL interroge une base de données en écrivant lui-même les requêtes SQL."
+            "ses sources. XK7-SQL interroge une base de données en écrivant lui-même les requêtes SQL. "
+            "XK7-QUALITE contrôle la qualité des données et propose des règles métier."
         )
         st.caption(
             "Sources : un cours universitaire de SQL ; Database Design, A. Watt et N. Eng (CC BY 4.0) ; "
@@ -216,7 +271,7 @@ for i, msg in enumerate(st.session_state["messages"]):
             st.markdown(msg["content"])
 
 # --- Nouvelle question
-if agent in ("core", "sql") and db_path is None:
+if agent in ("core", "sql", "qualite") and db_path is None:
     st.info("Dépose un fichier dans la barre latérale pour commencer.")
 elif (question := st.chat_input("Pose ta question...") or pending):
     if st.session_state["nb_questions"] >= MAX_QUESTIONS:
@@ -234,7 +289,9 @@ elif (question := st.chat_input("Pose ta question...") or pending):
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         if agent == "core":
             with st.spinner("XK7-CORE choisit l'agent..."):
-                result = run(question, previous, db_path, level, k)
+                source = (f"le fichier déposé par l'utilisateur ({db_label})" if db_path != DB_PATH
+                          else "la base de démonstration Chinook")
+                result = run(question, previous, db_path, level, k, source)
             chosen = result["agent"]
             route_text = ROUTE_LABELS[chosen] + (f" · {result['reason']}" if result.get("reason") else "")
             standalone = result.get("standalone", question)
@@ -252,6 +309,8 @@ elif (question := st.chat_input("Pose ta question...") or pending):
                 parts.append({"content": reply, "sources": sources})
             if result.get("sql"):
                 parts.append(sql_message(result["sql"], db_label))
+            if result.get("qualite"):
+                parts.append(quality_message(result["qualite"], db_label))
             if result.get("message"):
                 parts.append({"content": result["message"]})
             new_msg = {"role": "assistant", "agent": chosen, **parts[0], "route": route_text,
@@ -262,6 +321,11 @@ elif (question := st.chat_input("Pose ta question...") or pending):
             show_message(new_msg, key)
             for j, part in enumerate(new_msg["parts"]):
                 show_message(part, f"{key}_{j}")
+        elif agent == "qualite":
+            with st.spinner("Contrôle de la qualité des données..."):
+                report = check_quality(question, db_path)
+            new_msg = {"role": "assistant", "agent": "qualite", **quality_message(report, db_label)}
+            show_message(new_msg, len(st.session_state["messages"]))
         elif agent == "rag":
             with st.spinner("Recherche dans les documents..."):
                 reply, hits = answer(question, k=k, history=history, level=level)

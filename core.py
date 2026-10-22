@@ -14,7 +14,8 @@ split_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0,
 
 OFF_TOPIC_MESSAGE = ("Je ne peux pas répondre : XK7 est spécialisé dans les bases de données et le SQL. "
                      "Tu peux me poser une question de cours, par exemple « C'est quoi une jointure externe ? », "
-                     "ou une question sur les données, par exemple « Quels sont les 5 clients qui ont le plus dépensé ? ».")
+                     "une question sur les données, par exemple « Quels sont les 5 clients qui ont le plus dépensé ? », "
+                     "ou me demander de vérifier la qualité des données.")
 
 SPLIT_PROMPT = """La question suivante contient deux demandes : une explication de cours sur les bases de données
 ou le SQL, et une demande de résultat tiré d'une base de données.
@@ -39,6 +40,7 @@ class State(TypedDict, total=False):
     question: str            # question de l'utilisateur
     history: list            # messages précédents
     db_path: str             # base interrogée par XK7-SQL
+    source: str              # description de cette base pour le routeur (démo ou fichier déposé)
     level: str               # niveau des réponses de XK7-RAG
     k: int                   # nombre de passages pour XK7-RAG
     agent: str               # décision du routeur : rag, sql, les_deux, hors_sujet
@@ -47,6 +49,7 @@ class State(TypedDict, total=False):
     sql_question: str        # partie "données" de la question
     rag: Optional[dict]      # réponse de XK7-RAG : {"reply", "hits"}
     sql: Optional[dict]      # résultat de XK7-SQL (voir sql_agent.ask)
+    qualite: Optional[dict]  # rapport de XK7-QUALITE (voir quality_agent.check_quality)
     message: str             # message final quand aucun agent ne répond
     split_ok: bool           # le découpage d'une question mixte a-t-il réussi ?
     standalone: str          # question réécrite pour être comprise sans l'historique
@@ -56,7 +59,8 @@ class State(TypedDict, total=False):
 
 def route_node(state):
     """XK7-CORE choisit l'agent."""
-    decision = route(state["question"], state.get("history"), state.get("db_path", DB_PATH))
+    decision = route(state["question"], state.get("history"), state.get("db_path", DB_PATH),
+                     state.get("source") or "la base de démonstration Chinook")
     standalone = decision["question"]   # question de suivi complétée grâce à l'historique
     return {"agent": decision["agent"], "reason": decision.get("raison", ""), "standalone": standalone,
             "rag_question": standalone, "sql_question": standalone}
@@ -99,6 +103,12 @@ def sql_node(state):
     return {"sql": ask(state["sql_question"], state.get("db_path", DB_PATH))}
 
 
+def quality_node(state):
+    """XK7-QUALITE contrôle la base. Les contrôles sont faits en local ; le modèle ne voit que la structure."""
+    from quality_agent import check_quality
+    return {"qualite": check_quality(state["sql_question"], state.get("db_path", DB_PATH))}
+
+
 def off_topic_node(state):
     return {"message": OFF_TOPIC_MESSAGE}
 
@@ -106,7 +116,8 @@ def off_topic_node(state):
 # --- Les chemins entre les étapes -------------------------------------------------------
 
 def after_route(state):
-    return {"rag": "rag", "sql": "sql", "les_deux": "split", "hors_sujet": "hors_sujet"}[state["agent"]]
+    return {"rag": "rag", "sql": "sql", "qualite": "qualite", "les_deux": "split",
+            "hors_sujet": "hors_sujet"}[state["agent"]]
 
 
 def after_rag(state):
@@ -119,13 +130,15 @@ def build_graph():
     graph.add_node("split", split_node)
     graph.add_node("rag", rag_node)
     graph.add_node("sql", sql_node)
+    graph.add_node("qualite", quality_node)
     graph.add_node("hors_sujet", off_topic_node)
 
     graph.add_edge(START, "route")
-    graph.add_conditional_edges("route", after_route, ["rag", "sql", "split", "hors_sujet"])
+    graph.add_conditional_edges("route", after_route, ["rag", "sql", "qualite", "split", "hors_sujet"])
     graph.add_edge("split", "rag")                      # question mixte : d'abord le cours...
     graph.add_conditional_edges("rag", after_rag, ["sql", END])   # ... puis les données
     graph.add_edge("sql", END)
+    graph.add_edge("qualite", END)
     graph.add_edge("hors_sujet", END)
     return graph.compile()
 
@@ -133,10 +146,10 @@ def build_graph():
 core = build_graph()
 
 
-def run(question, history=None, db_path=DB_PATH, level="Intermédiaire", k=3):
+def run(question, history=None, db_path=DB_PATH, level="Intermédiaire", k=3, source=None):
     """Point d'entrée de XK7-CORE : une question, et le graphe fait le reste."""
     return core.invoke({"question": question, "history": history or [], "db_path": db_path,
-                        "level": level, "k": k})
+                        "level": level, "k": k, "source": source})
 
 
 if __name__ == "__main__":

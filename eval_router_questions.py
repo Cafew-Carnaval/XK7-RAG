@@ -55,4 +55,26 @@ QUESTIONS = [
     {"type": "nouveau", "question": "Pourquoi un NOT IN peut-il donner un résultat vide ? Vérifie-le sur les clients sans facture.",
      "agent": "les_deux"},
     {"type": "nouveau", "question": "Quel est le meilleur film de l'année ?", "agent": "hors_sujet"},
+
+    # --- Contrôle de la qualité -> qualite (ajoutées avec XK7-QUALITE)
+    {"type": "qualite", "question": "Vérifie la qualité des données.", "agent": "qualite"},
+    {"type": "qualite", "question": "Y a-t-il des doublons dans les clients ?", "agent": "qualite"},
+    {"type": "qualite", "question": "Les données des factures sont-elles fiables ?", "agent": "qualite"},
+    {"type": "qualite", "question": "Trouve les anomalies dans la base.", "agent": "qualite"},
+    {"type": "qualite", "question": "Est-ce qu'il manque des valeurs dans la table des employés ?", "agent": "qualite"},
+    {"type": "qualite", "question": "Combien de clients n'ont pas de numéro de fax ?", "agent": "sql"},
+    {"type": "qualite", "question": "C'est quoi un doublon dans une base de données ?", "agent": "rag"},
+    {"type": "qualite", "history": ["Vérifie la qualité des données."],
+     "question": "Comment corriger ça ?", "agent": "qualite"},
+    {"type": "qualite", "question": "Donne-moi un script SQL pour nettoyer les doublons.", "agent": "qualite"},
+
+    # --- Demandes vagues sur un fichier déposé -> qualite (aperçu complet)
+    {"type": "fichier", "source": "le fichier déposé par l'utilisateur (rh_test_erreurs.xlsx)",
+     "question": "Regarde l'Excel.", "agent": "qualite"},
+    {"type": "fichier", "source": "le fichier déposé par l'utilisateur (rh_test_erreurs.xlsx)",
+     "question": "Regarde le document.", "agent": "qualite"},
+    {"type": "fichier", "source": "le fichier déposé par l'utilisateur (ventes.csv)",
+     "question": "Qu'est-ce que tu penses de mon fichier ?", "agent": "qualite"},
+    {"type": "fichier", "source": "le fichier déposé par l'utilisateur (ventes.csv)",
+     "question": "Combien de lignes contient mon fichier ?", "agent": "sql"},
 ]

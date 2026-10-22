@@ -12,7 +12,8 @@ def main():
     print(f"{'Type':<12}{'Attendu':<12}{'Choisi':<12}Question")
     for q in QUESTIONS:
         history = [{"role": "user", "content": h} for h in q.get("history", [])]
-        decision = route(q["question"], history)
+        decision = route(q["question"], history,
+                         source=q.get("source", "la base de démonstration Chinook"))
         ok = decision["agent"] == q["agent"]
         good += ok
         by_type.setdefault(q["type"], [0, 0])

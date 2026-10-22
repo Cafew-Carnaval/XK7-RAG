@@ -10,7 +10,7 @@ load_dotenv()
 router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0,
                         model_kwargs={"response_format": {"type": "json_object"}})
 
-AGENTS = ("rag", "sql", "les_deux", "hors_sujet")
+AGENTS = ("rag", "sql", "qualite", "les_deux", "hors_sujet")
 
 ROUTER_PROMPT = """Tu es XK7-CORE, le chef d'orchestre d'un assistant data. Tu ne réponds jamais toi-même :
 tu décides quel agent doit traiter la question de l'utilisateur.
@@ -24,6 +24,20 @@ Les agents :
 - "sql" : XK7-SQL interroge une BASE DE DONNÉES précise en écrivant et en exécutant une requête, pour
   obtenir des chiffres, des listes ou des classements tirés des données. Il est en lecture seule : une
   demande de modification des données va quand même à "sql", qui la refusera lui-même.
+- "qualite" : XK7-QUALITE CONTRÔLE la qualité des données de la base : doublons, valeurs manquantes, formats
+  incohérents, valeurs aberrantes, liens cassés entre tables, règles métier non respectées. Exemples :
+  "vérifie la qualité des données", "y a-t-il des doublons dans les clients ?", "les données sont-elles
+  fiables ?", "trouve les anomalies". Une question qui demande un chiffre ou une liste précise tirée des
+  données ("combien de clients à Paris ?", "combien de commandes sans date ?", "liste les clients sans
+  email") va à "sql", même si elle porte sur des valeurs vides ; une question qui demande de CONTRÔLER,
+  VÉRIFIER ou DÉTECTER des problèmes, sans demander un chiffre précis, va à "qualite".
+  XK7-QUALITE propose aussi des CORRECTIONS (un script SQL à relire, qu'il n'exécute jamais) : une demande
+  de corriger, réparer ou nettoyer les problèmes de qualité ("comment corriger ça ?" après un contrôle,
+  "un script pour nettoyer les doublons") va à "qualite". Une demande d'EXÉCUTER une modification précise
+  ("supprime les factures de 2009", "mets les prix à 0") va à "sql", qui la refusera.
+  Une demande vague de REGARDER, OUVRIR, EXAMINER ou ANALYSER le fichier déposé, l'Excel, le CSV, le document
+  déposé ou la base ("regarde l'Excel", "qu'est-ce que tu penses de mon fichier ?") va aussi à "qualite" :
+  son rapport donne un aperçu complet (tables, nombre de lignes, état des données).
 - "les_deux" : la question demande EXPLICITEMENT une explication de cours ("explique", "c'est quoi",
   "pourquoi", "comment fonctionne") ET un résultat tiré des données (ex. "explique X, puis applique-le
   à la base"). Une simple question sur les données, même difficile, va à "sql" : XK7-SQL explique déjà
@@ -34,8 +48,10 @@ En cas de doute :
 - entre "rag" et "hors_sujet", choisis "rag" : XK7-RAG dira lui-même s'il ne trouve rien dans ses documents ;
 - entre "sql" et "les_deux", choisis "sql".
 
-Base de données actuellement disponible pour "sql" (noms des tables seulement) :
-{tables}
+Base de données actuellement disponible pour "sql" et "qualite" : {source}
+Noms des tables : {tables}
+Si l'utilisateur a déposé un fichier, "le fichier", "l'Excel" ou "le document" désignent ce fichier, et non
+les ouvrages de XK7-RAG.
 
 Questions précédentes de l'utilisateur (pour comprendre une question de suivi comme "et en 2013 ?") :
 {history}
@@ -43,7 +59,7 @@ Questions précédentes de l'utilisateur (pour comprendre une question de suivi 
 Question : {question}
 
 Réponds uniquement avec un JSON :
-{{"agent": "rag" | "sql" | "les_deux" | "hors_sujet",
+{{"agent": "rag" | "sql" | "qualite" | "les_deux" | "hors_sujet",
   "raison": "une phrase courte",
   "question": "la question réécrite pour être compréhensible seule, sans l'historique"}}
 Pour "question" : si la question est une suite ("et en 2013 ?", "et ceux qui ont dépensé moins ?"), complète-la
@@ -60,7 +76,7 @@ def table_names(db_path=DB_PATH):
         conn.close()
 
 
-def route(question, history=None, db_path=DB_PATH):
+def route(question, history=None, db_path=DB_PATH, source="la base de démonstration Chinook"):
     """Décide quel agent doit répondre. Renvoie {"agent": ..., "raison": ..., "question": ...},
     où "question" est la question réécrite pour être comprise sans l'historique.
     Confidentialité : le routeur ne voit que la question, les questions précédentes et les noms des tables,
@@ -68,6 +84,7 @@ def route(question, history=None, db_path=DB_PATH):
     previous = [m["content"] for m in (history or []) if m.get("role") == "user"][-3:]
     prompt = ROUTER_PROMPT.format(
         tables=", ".join(table_names(db_path)),
+        source=source,
         history="\n".join(f"- {q}" for q in previous) or "(aucune)",
         question=question,
     )
