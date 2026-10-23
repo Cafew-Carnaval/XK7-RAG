@@ -1,6 +1,7 @@
 import re
 import json
 import unicodedata
+import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -168,6 +169,14 @@ def check_duplicates(t, df, pk):
         key = ident.map(plain).agg(" | ".join, axis=1)
         variants = raw.groupby(key).transform("nunique")   # nombre d'écritures différentes de la même clé
         near = (variants > 1) & ~df.duplicated(subset=others, keep=False)
+        # Contexte : une colonne de catégories qui diffère entre les lignes semblables (ex. le département de deux
+        # communes homonymes, Saint-Rémy dans l'Ain et Saint-Rémy en Saône-et-Loire) montre qu'il s'agit de deux
+        # choses différentes, pas d'une saisie en double
+        context = [c for c in text_cols if c not in identity and not is_id_column(c)
+                   and 1 < df[c].nunique() <= 0.5 * len(df)]
+        for c in context:
+            differs = df[c].fillna("").astype(str).map(plain).groupby(key).transform("nunique") > 1
+            near &= ~differs
         if near.any():
             found.append(issue("doublon approché", t, ", ".join(identity), A_VERIFIER,
                                f"{int(near.sum())} ligne(s) qui se ressemblent après simplification "
@@ -200,8 +209,16 @@ def check_formats(t, df, pk):
         top, share = shapes.value_counts().index[0], shapes.value_counts(normalize=True).iloc[0]
         if len(text) >= 10 and 0.9 <= share < 1:
             bad = shapes != top
-            found.append(issue("format", t, col, A_VERIFIER, f"{int(bad.sum())} valeur(s) au format différent des "
-                               f"autres (format habituel : {top})", text.index[bad], df))
+            other_shapes = shapes[bad].value_counts()
+            if other_shapes.min() >= 20:
+                # Chaque autre format revient souvent : sans doute une convention (ex. 2A pour la Corse, 971 pour
+                # la Guadeloupe), pas une faute de frappe, qui serait isolée
+                found.append(issue("format", t, col, INFO, f"plusieurs formats coexistent : {top} et "
+                                   f"{', '.join(other_shapes.index)} ({int(bad.sum())} valeurs). Si c'est une "
+                                   "convention connue, rien à faire", text.index[bad], df))
+            else:
+                found.append(issue("format", t, col, A_VERIFIER, f"{int(bad.sum())} valeur(s) au format différent "
+                                   f"des autres (format habituel : {top})", text.index[bad], df))
         # Même valeur écrite de plusieurs façons ("Lyon", "lyon", "LYON ") dans une colonne de catégories
         if text.nunique() <= 50 and text.nunique() <= 0.5 * len(text):
             for _, group in text.groupby(text.map(plain)):
@@ -227,14 +244,29 @@ def check_outliers(t, df, pk):
         if negative.any() and negative.mean() < 0.05:
             found.append(issue("aberrant", t, col, ERREUR, f"{int(negative.sum())} valeur(s) négative(s) dans une "
                                "colonne normalement positive", values.index[negative], df))
-        # Valeurs extrêmes (règle de l'écart interquartile, version large : 3 x IQR)
+        # Valeurs extrêmes (règle de l'écart interquartile, version large : 3 x IQR). Pour des montants positifs
+        # très asymétriques (quelques valeurs bien plus hautes, comme les loyers de Paris), l'écart est mesuré
+        # sur une échelle logarithmique : un loyer 3 fois plus cher que la médiane est rare mais normal
         q1, q3 = values.quantile(0.25), values.quantile(0.75)
         iqr = q3 - q1
-        if iqr > 0:
+        skewed = values.min() > 0 and values.skew() > 1
+        if skewed:
+            logs = np.log(values)
+            l1, l3 = logs.quantile(0.25), logs.quantile(0.75)
+            extreme = (logs > l3 + 3 * (l3 - l1)) | (logs < l1 - 3 * (l3 - l1)) if l3 > l1 else logs < -np.inf
+        elif iqr > 0:
             extreme = (values > q3 + 3 * iqr) | ((values < q1 - 3 * iqr) & (values >= 0))
+        if iqr > 0:
             # Au-delà de 2 % des valeurs (et de 2 lignes), ce n'est plus une anomalie mais un groupe à part
             # (ex. des films parmi des chansons)
-            if extreme.any() and extreme.sum() <= max(2, 0.02 * len(values)):
+            # Quelques valeurs isolées (1 à 3, ex. un salaire de 48 000 €) : sans doute une erreur de saisie.
+            # Des dizaines de valeurs extrêmes : la queue naturelle de la distribution (ex. les loyers de Paris)
+            if extreme.any() and extreme.sum() <= max(2, 0.02 * len(values)) and extreme.sum() >= 20:
+                found.append(issue("aberrant", t, col, INFO, f"{int(extreme.sum())} valeurs bien plus élevées que les "
+                                   "autres, trop nombreuses pour être des fautes de frappe : sans doute des cas réels "
+                                   f"(ex. les grandes villes). Habituellement entre {q1:g} et {q3:g}",
+                                   values.index[extreme], df))
+            elif extreme.any() and extreme.sum() <= max(2, 0.02 * len(values)):
                 found.append(issue("aberrant", t, col, A_VERIFIER, f"{int(extreme.sum())} valeur(s) très éloignée(s) "
                                    f"des autres (habituellement entre {q1:g} et {q3:g})", values.index[extreme], df))
     return found

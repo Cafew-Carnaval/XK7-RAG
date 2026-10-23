@@ -140,11 +140,25 @@ Une boutique fictive en deux versions : une propre, et une copie avec 21 erreurs
 | Mesure | Résultat |
 |---|---|
 | Erreurs retrouvées par les contrôles locaux | 19/21 (les 2 autres sont des règles métier) |
-| Erreurs retrouvées avec les règles métier de GPT-4o | 21/21 attendues (voir `evaluate_quality.py`) |
+| Erreurs retrouvées avec les règles métier de GPT-4o | 21/21 |
 | Fausses alertes sur la version propre | 0 |
 | Données envoyées au modèle | aucune |
 
 Test supplémentaire sur un fichier RH fictif jamais vu pendant le développement : les 15 erreurs cachées retrouvées, dont les 2 règles métier, pensées seules par le modèle. Sur Chinook, l'agent trouve de vrais défauts de cette base très connue : "Edinburgh " avec un espace en trop, "Dublin" dans la colonne des États, des playlists en double. Sur le fichier de test de XK7-SQL, il a trouvé 10 commandes passées avant l'inscription du client, une erreur réelle dans la génération de ce fichier.
+
+### L'épreuve des données réelles
+
+Sur ses fichiers de test, XK7-QUALITE était parfait. Sur une vraie base publique (les loyers 2025 de 34 900 communes, soit 140 000 lignes, estimations ANIL à partir des données du Groupe SeLoger et de leboncoin), il a levé environ 4 300 alertes, toutes fausses :
+
+| Fausse alerte | Réalité | Règle générale ajoutée |
+|---|---|---|
+| 147 « doublons » de communes | des communes homonymes dans des départements différents | deux lignes au nom proche ne sont pas un doublon si une colonne de contexte (le département) les distingue |
+| 1 900 « formats différents » | les codes de la Corse (2A, 2B) et de l'outre-mer (971...) | un format minoritaire qui revient souvent est une convention, signalée en simple information ; une faute de frappe est isolée |
+| 1 400 « valeurs aberrantes » | les loyers de Paris et de la petite couronne | écart mesuré sur une échelle logarithmique pour les montants très asymétriques ; quelques valeurs isolées sont à vérifier, des dizaines forment la queue naturelle de la distribution |
+
+Après correction : 100/100 et 0 alerte sur les loyers (7 informations), toujours 21/21 sur les erreurs injectées et 0 fausse alerte sur le fichier propre. Sur Chinook, les « doublons » de morceaux passent de 34 à 4 (des titres identiques sur des albums différents ne sont plus signalés).
+
+Leçon : un contrôle réglé sur des données de test doit être éprouvé sur des données réelles avant d'être cru.
 
 ## XK7-RAG : la documentation
 
