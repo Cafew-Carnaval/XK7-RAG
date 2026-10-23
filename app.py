@@ -124,6 +124,10 @@ def show_sources(sources):
 
 def show_sql_result(msg, key):
     """Affiche le résultat de XK7-SQL : tableau, téléchargement et requête utilisée."""
+    if msg.get("write_sql"):
+        st.markdown(":material/edit_note: **Requête proposée** (non exécutée)")
+        st.code(msg["write_sql"], language="sql")
+        st.caption(f"Lignes qu'elle toucherait : {len(msg['rows'])}{' ou plus' if msg.get('truncated') else ''}")
     if not msg.get("columns"):
         return
     df = pd.DataFrame(msg["rows"], columns=msg["columns"])
@@ -288,6 +292,10 @@ def quality_message(report, db_label):
 
 def sql_message(result, db_label):
     """Transforme un résultat de XK7-SQL en message à afficher."""
+    if result.get("write_sql"):                   # demande de modification : proposition, jamais exécutée
+        return {"badge": "XK7-SQL", "content": f"{result['explanation']}\n\n{result['message']}",
+                "write_sql": result["write_sql"], "sql": result["sql"], "columns": result["columns"],
+                "rows": result["rows"], "truncated": result["truncated"]}
     if not result["ok"]:
         return {"badge": "XK7-SQL", "content": result["message"]}
     n = len(result["rows"])
@@ -323,7 +331,7 @@ def easter_egg():
         if os.path.exists(song):
             st.audio(song, autoplay=True)
         st.markdown("**Tableau d'honneur**")
-        for col, (label, value) in zip(st.columns(4), [("Routage", "61/61"), ("SQL", "27/27"),
+        for col, (label, value) in zip(st.columns(4), [("Routage", "64/64"), ("SQL", "31/31"),
                                                         ("Qualité", "21/21"), ("Analyse", "18/18")]):
             col.metric(label, value)
         st.caption("Données envoyées aux modèles pendant toutes ces évaluations : aucune.")

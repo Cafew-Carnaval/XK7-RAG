@@ -96,4 +96,9 @@ QUESTIONS = [
     {"type": "nouveau", "question": "Quel employé a le plus de clients ?", "agent": "sql"},
     {"type": "nouveau", "question": "Comment ont évolué les ventes de rock depuis 2009 ?", "agent": "analyse"},
     {"type": "nouveau", "question": "À quoi servent les verrous ?", "agent": "rag"},
+    # Moins défensif (23/10) : le code d'une modification va à XK7-SQL, qui le propose sans l'exécuter
+    {"type": "doit répondre", "source": "le fichier déposé par l'utilisateur (ventes_cafe_test.xlsx)",
+     "question": "Quel code SQL pour supprimer les ventes inférieures à 30 en août ?", "agent": "sql"},
+    {"type": "doit répondre", "question": "Écris-moi la requête pour passer tous les prix du jazz à 0,79.", "agent": "sql"},
+    {"type": "doit répondre", "question": "Comment écrire un DELETE avec une sous-requête ?", "agent": "rag"},
 ]

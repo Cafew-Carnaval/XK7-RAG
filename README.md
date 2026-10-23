@@ -5,7 +5,7 @@ Un assistant data multi-agent, déployé en ligne. Chaque agent est spécialisé
 | Agent | Rôle | État |
 |---|---|---|
 | XK7-RAG | Répond aux questions sur les bases de données et le SQL à partir d'une bibliothèque d'ouvrages, en citant ses sources | Terminé |
-| XK7-SQL | Interroge une base de données en français : écrit la requête SQL, l'exécute en lecture seule et affiche le résultat, sans jamais montrer les données au modèle | Terminé |
+| XK7-SQL | Interroge une base de données en français : écrit la requête SQL, l'exécute en lecture seule et affiche le résultat, sans jamais montrer les données au modèle. Pour une modification, propose la requête sans l'exécuter | Terminé |
 | XK7-ANALYSE | Analyse une base (évolution, répartition, comparaison, classement, corrélation) et trace le graphique ; calculs et conclusion faits par le code, sans montrer les données au modèle | Terminé |
 | XK7-QUALITE | Contrôle la qualité des données (doublons, valeurs manquantes, formats, liens cassés, règles métier) et propose un script de correction, sans jamais l'exécuter | Terminé |
 | XK7-CORE | Agent chef (LangGraph) qui envoie chaque question au bon agent, ou découpe une question mixte et enchaîne les deux | Terminé |
@@ -57,6 +57,7 @@ flowchart LR
 | Après ajout de XK7-QUALITE et des fichiers déposés (47 questions) | 47/47 (14 cours, 15 données, 10 qualité, 4 mixtes, 4 hors sujet) |
 | Après ajout de XK7-ANALYSE (57 questions, premier essai) | 54/57 : 2 questions sur les données envoyées à l'analyse, 1 régression |
 | Après correction du prompt (61 questions) | 61/61 (16 cours, 18 données, 10 qualité, 9 analyse, 4 mixtes, 4 hors sujet) |
+| Avec les questions « doit répondre » (64 questions) | 64/64 |
 | Dont questions écrites après les corrections | 10/10 |
 | Temps moyen par décision | environ 1 s |
 
@@ -227,11 +228,20 @@ C'est le principe central de XK7-SQL. Le modèle reçoit uniquement la structure
 
 ### Sécurité : trois barrières indépendantes
 
-1. Le prompt demande au modèle de refuser toute demande de modification ("supprime", "mets à jour"...).
+1. Le prompt interdit au modèle d'exécuter une modification ("supprime", "mets à jour"...) : il peut seulement la proposer (voir plus bas).
 2. Avant l'exécution, `check_sql()` n'accepte qu'une seule requête de lecture (SELECT ou WITH) et refuse les mots-clés dangereux (DELETE, DROP, UPDATE, PRAGMA, ATTACH...), y compris les contournements comme `WITH ... DELETE` ou deux requêtes séparées par un point-virgule.
 3. La base est ouverte en lecture seule : même une requête qui passerait les deux premières barrières ne pourrait rien modifier.
 
 S'y ajoutent une limite de 5 secondes par requête et de 100 lignes par résultat.
+
+### Les modifications : proposer sans exécuter
+
+Une première version refusait sèchement toute demande de modification, même "Quel code SQL pour supprimer les ventes inférieures à 30 en août ?", où l'utilisateur voulait seulement le code. Un assistant qui refuse trop souvent n'est pas utilisé : XK7-SQL propose désormais la requête, sans jamais l'exécuter.
+
+- La requête proposée est vérifiée par SQLite avec `EXPLAIN`, qui la compile (tables et colonnes) sans la lancer, sur une base de toute façon en lecture seule. Une seule requête UPDATE, DELETE ou INSERT est acceptée.
+- L'aperçu des lignes concernées est calculé par le code à partir de la requête proposée : `UPDATE t SET ... WHERE c` devient `SELECT * FROM t WHERE c`. Le modèle écrivait parfois un aperçu des lignes après modification ("les prix déjà à 0") : un aperçu construit par le code reprend exactement les mêmes conditions.
+- Un aperçu vide déclenche une vérification : sur "en août", le modèle avait inventé une année ; il corrige et trouve les 9 commandes concernées.
+- L'évaluation vérifie que la requête est proposée et que l'aperçu montre le bon nombre de lignes.
 
 ### Fonctionnement
 
@@ -242,22 +252,22 @@ S'y ajoutent une limite de 5 secondes par requête et de 100 lignes par résulta
 | Sécurité | `sql_agent.py` | Vérification de la requête, exécution en lecture seule avec limites de temps et de lignes |
 | Auto-correction | `sql_agent.py` | Si la requête échoue, le message d'erreur est renvoyé au modèle, qui corrige (3 essais au maximum) |
 | Fichiers | `data_upload.py` | Conversion d'un CSV, d'un Excel ou d'une base SQLite déposés en base temporaire (séparateur détecté, nombres à la française convertis) |
-| Évaluation | `evaluate_sql.py`, `eval_sql_questions.py` | 17 questions, résultats comparés à des requêtes de référence, test de confidentialité |
+| Évaluation | `evaluate_sql.py`, `eval_sql_questions.py` | 31 questions, résultats comparés à des requêtes de référence, aperçu des modifications vérifié, test de confidentialité |
 
 ### Évaluation
 
-Le jeu de test compte 27 questions sur deux bases :
+Le jeu de test compte 31 questions sur deux bases :
 
-- Chinook (18 questions) : 3 simples, 6 moyennes (classements, regroupements, filtres sur les dates), 5 difficiles (NOT IN, NOT EXISTS, table jointe à elle-même), 2 demandes de modification et 2 questions hors sujet.
-- Une base inconnue (9 questions) : un fichier Excel fictif (`data/ventes_cafe_test.xlsx`, une boutique de café et de thé) que le modèle n'a jamais pu voir. Il n'a aucun lien déclaré entre les onglets, des noms de colonnes en français avec espaces et accents, et un chiffre d'affaires à calculer (quantité × prix unitaire).
+- Chinook (20 questions) : 3 simples, 7 moyennes (classements, regroupements, filtres sur les dates), 5 difficiles (NOT IN, NOT EXISTS, table jointe à elle-même), 3 demandes de modification et 2 questions hors sujet.
+- Une base inconnue (11 questions, dont une demande de modification) : un fichier Excel fictif (`data/ventes_cafe_test.xlsx`, une boutique de café et de thé) que le modèle n'a jamais pu voir. Il n'a aucun lien déclaré entre les onglets, des noms de colonnes en français avec espaces et accents, et un chiffre d'affaires à calculer (quantité × prix unitaire).
 
 L'évaluation compare les résultats, pas les requêtes : deux requêtes différentes qui donnent le même résultat sont toutes les deux justes. L'agent peut ajouter des colonnes ou présenter un nom en une seule colonne ; l'ordre ne compte que pour les classements.
 
 | Mesure | Résultat |
 |---|---|
-| Chinook : résultats justes | 14/14 |
-| Chinook : refus corrects (2 modifications, 2 hors sujet) | 4/4 |
-| Base inconnue : résultats justes | 9/9 |
+| Chinook : résultats justes | 15/15 |
+| Chinook : modifications proposées avec le bon aperçu, et refus hors sujet | 5/5 |
+| Base inconnue : résultats justes et modification proposée | 11/11 |
 | Données de la base envoyées au modèle | aucune |
 
 Sur Chinook, les résultats sont identiques avec et sans lignes d'exemple dans le prompt.

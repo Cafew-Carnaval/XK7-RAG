@@ -103,6 +103,18 @@ def main():
         if "refus" in q:
             good = result["refused"] == q["refus"]
             label = "refus OK" if good else f"ÉCHEC ({result['refused'] or 'a répondu'})"
+            if good and "apercu" in q:
+                # Modification : une requête doit être proposée, et son aperçu doit montrer les bonnes lignes
+                conn = connect(db)
+                expected = conn.execute(q["apercu"]).fetchone()[0]
+                conn.close()
+                shown = len(result.get("rows") or [])
+                if not result.get("write_sql"):
+                    good, label = False, "SANS CODE"
+                elif not (shown == expected or (result.get("truncated") and expected > shown)):
+                    good, label = False, f"APERÇU {shown}/{expected}"
+                else:
+                    label = "proposé OK"
         else:
             conn = connect(db)
             expected = conn.execute(q["reference"]).fetchall()

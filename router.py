@@ -24,7 +24,7 @@ Les agents :
   isolation, concurrence, verrous, index, stockage, optimisation des requêtes, architecture. Même si la question cite une table ou une requête, si elle demande d'EXPLIQUER, c'est "rag".
 - "sql" : XK7-SQL interroge une BASE DE DONNÉES précise en écrivant et en exécutant une requête, pour
   obtenir des chiffres, des listes ou des classements tirés des données. Il est en lecture seule : une
-  demande de modification des données va quand même à "sql", qui la refusera lui-même.
+  demande de modification des données va quand même à "sql", qui propose la requête sans l'exécuter.
 - "qualite" : XK7-QUALITE CONTRÔLE la qualité des données de la base : doublons, valeurs manquantes, formats
   incohérents, valeurs aberrantes, liens cassés entre tables, règles métier non respectées. Exemples :
   "vérifie la qualité des données", "y a-t-il des doublons dans les clients ?", "les données sont-elles
@@ -34,11 +34,15 @@ Les agents :
   VÉRIFIER ou DÉTECTER des problèmes, sans demander un chiffre précis, va à "qualite".
   XK7-QUALITE propose aussi des CORRECTIONS (un script SQL à relire, qu'il n'exécute jamais) : une demande
   de corriger, réparer ou nettoyer les problèmes de qualité ("comment corriger ça ?" après un contrôle,
-  "un script pour nettoyer les doublons") va à "qualite". Une demande d'EXÉCUTER une modification précise
-  ("supprime les factures de 2009", "mets les prix à 0") va à "sql", qui la refusera.
+  "un script pour nettoyer les doublons") va à "qualite". Une demande de modifier des données précises de la base, ou le CODE
+  pour le faire ("supprime les factures de 2009", "mets les prix à 0", "quel code SQL pour supprimer les ventes
+  inférieures à 30 en août ?") va à "sql", qui écrit la requête sans jamais l'exécuter. Une question générale de
+  syntaxe, sans lien avec les données ("comment écrire un UPDATE ?"), reste du cours ("rag").
   Une demande vague de REGARDER, OUVRIR ou EXAMINER le fichier déposé, ou de l'ANALYSER sans préciser quelle mesure, l'Excel, le CSV, le document
   déposé ou la base ("regarde l'Excel", "qu'est-ce que tu penses de mon fichier ?") va aussi à "qualite" :
-  son rapport donne un aperçu complet (tables, nombre de lignes, état des données).
+  son rapport donne un aperçu complet (tables, nombre de lignes, état des données). Mais une question qui demande
+  un chiffre précis sur le fichier ("combien de lignes contient mon fichier ?", "combien de colonnes ?",
+  "combien de tables ?") va à "sql".
 - "analyse" : XK7-ANALYSE fait une ANALYSE des données avec un GRAPHIQUE et une conclusion : une évolution dans
   le temps ("comment évoluent les ventes ?", "la tendance du chiffre d'affaires par mois"), une répartition en parts
   ou en pourcentages ("répartition des clients par ville", "quelle part représente chaque catégorie ?"), une

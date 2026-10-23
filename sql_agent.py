@@ -39,6 +39,8 @@ Règles :
   les noms des colonnes (colonnes en anglais : valeurs en anglais, ex. 'Germany' ; colonnes en français :
   valeurs en français, ex. 'Allemagne'). Pour filtrer sur un texte, utilise LIKE, qui ignore les majuscules.
 - Les dates sont des textes au format 'AAAA-MM-JJ HH:MM:SS' : utilise strftime('%Y', colonne) pour l'année.
+  Un mois sans année ("en août") désigne ce mois pour TOUTES les années : strftime('%m', colonne) = '08'.
+  N'invente jamais une année que la question ne donne pas.
 - Pour compter des articles vendus, additionne les quantités (SUM) s'il existe une colonne de quantité.
 - Pour "jamais", "aucun", "n'a pas", "sans" : exclus tous ceux qui ont AU MOINS UNE fois la propriété,
   avec NOT EXISTS ou NOT IN sur une sous-requête. Un simple <> ou une jointure externe filtrée ne suffit pas :
@@ -48,9 +50,22 @@ Règles :
   puis la moyenne de ces totaux), et non la moyenne des lignes de détail.
 - Pour un type ou une famille (ex. "les produits bio", "les films d'action"), filtre de préférence sur une colonne de
   catégorie ou de genre si elle existe, plutôt que sur un mot dans un nom de produit.
+- Pour "quel client", "quel employé", "quel produit"... renvoie aussi son nom (prénom et nom, désignation),
+  avec une jointure si le nom est dans une autre table, pas seulement son identifiant.
+- Pour "le plus" ou "le moins", trie et garde la première ligne (ORDER BY ... DESC LIMIT 1). N'utilise pas
+  MAX() ou MIN() avec d'autres colonnes non agrégées dans le même SELECT.
 - Donne des noms de colonnes lisibles avec AS.
 - Sauf si la question demande tout, limite le résultat à 100 lignes (LIMIT 100).
-- Si la question demande de modifier, ajouter ou supprimer des données, réponds uniquement : {write_request}
+- Si la question demande de modifier, ajouter ou supprimer des données (ou le code pour le faire), tu n'exécutes rien :
+  tu PROPOSES la requête, que l'utilisateur relira et lancera lui-même. Réponds alors exactement dans ce format :
+{write_request}
+```sql
+la requête de modification (UPDATE, DELETE ou INSERT), une seule
+```
+```sql
+un SELECT qui renvoie les lignes que cette modification toucherait (mêmes conditions), avec leurs colonnes utiles
+```
+Explication : une phrase en français qui dit ce que fait la modification.
 - Si la question ne peut pas être traitée avec cette base (sujet sans rapport), réponds uniquement : {off_topic}
 
 Réponds exactement dans ce format :
@@ -64,6 +79,9 @@ Structure de la base :
 
 Question : {question}
 {previous_error}"""
+
+PROPOSAL_NOTE = ("Requête proposée, **non exécutée** : XK7-SQL est en lecture seule. Relis-la, puis lance-la "
+                 "toi-même sur une copie de la base. Les lignes qu'elle toucherait sont affichées ci-dessous.")
 
 REFUSALS = {
     "hors_sujet": "Je ne peux pas répondre : cette question ne porte pas sur le contenu de la base de données.",
@@ -178,6 +196,11 @@ def generate_sql(question, schema, previous_sql=None, error=None):
     reply = llm.invoke(prompt).content.strip()
 
     if reply.startswith(WRITE_REQUEST):
+        blocks = re.findall(r"```(?:sql)?\s*(.+?)```", reply, re.DOTALL | re.IGNORECASE)
+        explanation = re.search(r"Explication\s*:\s*(.+)", reply)
+        if len(blocks) >= 2:
+            return {"write": blocks[0].strip(), "preview": blocks[1].strip(),
+                    "explanation": explanation.group(1).strip() if explanation else ""}, "modification"
         return None, "modification"
     if reply.startswith(OFF_TOPIC):
         return None, "hors_sujet"
@@ -188,6 +211,88 @@ def generate_sql(question, schema, previous_sql=None, error=None):
     return sql, explanation.group(1).strip() if explanation else ""
 
 
+WRITE_START = re.compile(r"^\s*(UPDATE|DELETE|INSERT|REPLACE)\b", re.IGNORECASE)
+
+
+def check_write_sql(sql, db_path=DB_PATH):
+    """Vérifie qu'une requête de modification PROPOSÉE est valide, sans jamais l'exécuter :
+    EXPLAIN demande à SQLite de la compiler (tables et colonnes vérifiées) sans la lancer,
+    et la base est de toute façon ouverte en lecture seule."""
+    if not WRITE_START.match(sql) or ";" in sql.strip().rstrip(";"):
+        raise sqlite3.OperationalError("La proposition doit être une seule requête UPDATE, DELETE ou INSERT.")
+    conn = connect(db_path)
+    try:
+        conn.execute("EXPLAIN " + sql.strip().rstrip(";"))
+    finally:
+        conn.close()
+
+
+def top_level_keyword(sql, keyword, start=0):
+    """Position du premier mot-clé (ex. WHERE) qui n'est ni entre parenthèses (sous-requête) ni entre guillemets
+    ou apostrophes, ou -1."""
+    depth, quote, i = 0, None, start
+    while i < len(sql):
+        ch = sql[i]
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and re.match(rf"{keyword}\b", sql[i:], re.IGNORECASE) and (i == 0 or not sql[i - 1].isalnum()):
+            return i
+        i += 1
+    return -1
+
+
+def derived_preview(write_sql):
+    """Aperçu calculé par le code à partir de la modification proposée : mêmes table et mêmes conditions,
+    donc exactement les lignes touchées. None pour les cas complexes (INSERT, UPDATE ... FROM)."""
+    sql = write_sql.strip().rstrip(";").strip()
+    table = r'("(?:[^"]|"")+"|\[[^\]]+\]|[\w.]+)'
+    m = re.match(rf"DELETE\s+FROM\s+{table}\s*", sql, re.IGNORECASE)
+    if not m:
+        m = re.match(rf"UPDATE\s+(?:OR\s+\w+\s+)?{table}\s+SET\s", sql, re.IGNORECASE)
+        if not m or top_level_keyword(sql, "FROM", m.end()) != -1:     # UPDATE ... FROM : trop complexe
+            return None
+    where = top_level_keyword(sql, "WHERE", m.end())
+    condition = sql[where:] if where != -1 else ""
+    if re.search(r"\b(RETURNING|ORDER\s+BY|LIMIT)\b", condition, re.IGNORECASE):
+        return None
+    return f"SELECT * FROM {m.group(1)} {condition}".strip()
+
+
+def propose(question, schema, proposal, db_path, attempts):
+    """Demande de modification : on vérifie la requête proposée et on montre les lignes concernées.
+    Rien n'est modifié. En cas d'erreur, le modèle corrige sa proposition (mêmes règles que pour un SELECT)."""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            check_write_sql(proposal["write"], db_path)
+            proposal["preview"] = derived_preview(proposal["write"]) or proposal["preview"]
+            columns, rows, truncated = run_sql(proposal["preview"], db_path)
+            if not rows and attempt == 1:
+                # Aperçu vide : souvent une valeur ou une année inventée. Une seule vérification, puis on accepte
+                raise sqlite3.OperationalError(
+                    "L'aperçu ne renvoie aucune ligne. Vérifie les filtres : n'as-tu pas inventé une valeur ou une "
+                    "année absente de la question ? Si la question est bien respectée, renvoie la même proposition.")
+            return {"ok": False, "refused": "modification", "message": PROPOSAL_NOTE, "attempts": attempts,
+                    "write_sql": proposal["write"], "sql": proposal["preview"],
+                    "explanation": proposal["explanation"], "columns": columns, "rows": rows, "truncated": truncated}
+        except (sqlite3.Error, UnsafeQuery) as e:
+            error = str(e)
+            attempts.append({"sql": proposal["write"], "error": error})
+            if attempt == MAX_ATTEMPTS:
+                break
+            retry, kind = generate_sql(question, schema, f"{proposal['write']}\n\n{proposal['preview']}", error)
+            if not isinstance(retry, dict):
+                break
+            proposal = retry
+    return {"ok": False, "refused": "modification", "message": REFUSALS["modification"], "attempts": attempts}
+
+
 def ask(question, db_path=DB_PATH):
     """Point d'entrée de XK7-SQL : question en français -> requête -> résultat.
     Seuls la structure et les messages d'erreur SQL sont envoyés au modèle, jamais les données."""
@@ -195,6 +300,8 @@ def ask(question, db_path=DB_PATH):
     sql, error, attempts = None, None, []
     for attempt in range(1, MAX_ATTEMPTS + 1):
         sql, explanation = generate_sql(question, schema, sql, error)
+        if isinstance(sql, dict):              # demande de modification : proposition, jamais exécutée
+            return propose(question, schema, sql, db_path, attempts)
         if sql is None:
             return {"ok": False, "refused": explanation, "message": REFUSALS[explanation], "attempts": attempts}
         try:
