@@ -77,4 +77,23 @@ QUESTIONS = [
      "question": "Qu'est-ce que tu penses de mon fichier ?", "agent": "qualite"},
     {"type": "fichier", "source": "le fichier déposé par l'utilisateur (ventes.csv)",
      "question": "Combien de lignes contient mon fichier ?", "agent": "sql"},
+
+    # --- Analyses avec graphique -> analyse ; et les pièges qui restent à sql
+    {"type": "analyse", "question": "Comment évolue le chiffre d'affaires par année ?", "agent": "analyse"},
+    {"type": "analyse", "question": "Quelle est la répartition des morceaux par genre ?", "agent": "analyse"},
+    {"type": "analyse", "question": "Y a-t-il un lien entre la durée d'un morceau et son prix ?", "agent": "analyse"},
+    {"type": "analyse", "question": "Compare les ventes entre les pays.", "agent": "analyse"},
+    {"type": "analyse", "question": "Fais-moi un graphique du nombre de factures par mois.", "agent": "analyse"},
+    {"type": "analyse", "question": "Quelle part du chiffre d'affaires fait chaque genre ?", "agent": "analyse"},
+    {"type": "analyse", "source": "le fichier déposé par l'utilisateur (ventes_cafe_test.xlsx)",
+     "question": "Analyse les ventes par mois.", "agent": "analyse"},
+    {"type": "analyse", "question": "Quel est le chiffre d'affaires par pays ?", "agent": "sql"},
+    {"type": "analyse", "question": "C'est quoi une corrélation ?", "agent": "rag"},
+    {"type": "analyse", "history": ["Comment évolue le chiffre d'affaires par année ?"],
+     "question": "Et par mois ?", "agent": "analyse"},
+    # Écrites APRÈS la correction du 23/10, pour vérifier que la règle est générale (pas de surapprentissage)
+    {"type": "nouveau", "question": "Quel est le prix moyen des morceaux par type de média ?", "agent": "sql"},
+    {"type": "nouveau", "question": "Quel employé a le plus de clients ?", "agent": "sql"},
+    {"type": "nouveau", "question": "Comment ont évolué les ventes de rock depuis 2009 ?", "agent": "analyse"},
+    {"type": "nouveau", "question": "À quoi servent les verrous ?", "agent": "rag"},
 ]

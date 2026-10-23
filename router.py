@@ -10,7 +10,7 @@ load_dotenv()
 router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0,
                         model_kwargs={"response_format": {"type": "json_object"}})
 
-AGENTS = ("rag", "sql", "qualite", "les_deux", "hors_sujet")
+AGENTS = ("rag", "sql", "qualite", "analyse", "les_deux", "hors_sujet")
 
 ROUTER_PROMPT = """Tu es XK7-CORE, le chef d'orchestre d'un assistant data. Tu ne réponds jamais toi-même :
 tu décides quel agent doit traiter la question de l'utilisateur.
@@ -35,20 +35,36 @@ Les agents :
   de corriger, réparer ou nettoyer les problèmes de qualité ("comment corriger ça ?" après un contrôle,
   "un script pour nettoyer les doublons") va à "qualite". Une demande d'EXÉCUTER une modification précise
   ("supprime les factures de 2009", "mets les prix à 0") va à "sql", qui la refusera.
-  Une demande vague de REGARDER, OUVRIR, EXAMINER ou ANALYSER le fichier déposé, l'Excel, le CSV, le document
+  Une demande vague de REGARDER, OUVRIR ou EXAMINER le fichier déposé, ou de l'ANALYSER sans préciser quelle mesure, l'Excel, le CSV, le document
   déposé ou la base ("regarde l'Excel", "qu'est-ce que tu penses de mon fichier ?") va aussi à "qualite" :
   son rapport donne un aperçu complet (tables, nombre de lignes, état des données).
+- "analyse" : XK7-ANALYSE fait une ANALYSE des données avec un GRAPHIQUE et une conclusion : une évolution dans
+  le temps ("comment évoluent les ventes ?", "la tendance du chiffre d'affaires par mois"), une répartition en parts
+  ou en pourcentages ("répartition des clients par ville", "quelle part représente chaque catégorie ?"), une
+  comparaison entre groupes ("compare les ventes entre les pays"), un lien entre deux valeurs ("y a-t-il un lien
+  entre le prix et la quantité ?", "est-ce que X dépend de Y ?"), ou toute demande de graphique, de courbe,
+  de visualisation ou d'analyse d'une mesure ("analyse les ventes", "fais-moi un graphique des commandes").
+  "analyse" seulement si la question contient un mot EXPLICITE d'analyse : évolution / évolue, tendance, au fil du
+  temps, répartition / se répartissent, part, proportion, pourcentage, compare / comparaison, lien, corrélation,
+  dépend, graphique, courbe, visualise, analyse. Sans un de ces mots, c'est "sql", même avec "par pays",
+  "par genre", "par mois", "le mieux", "le plus", "la moyenne" : "Quel genre se vend le mieux en France ?",
+  "Donne la durée moyenne des morceaux par genre", "Le chiffre d'affaires par pays" vont à "sql".
 - "les_deux" : la question demande EXPLICITEMENT une explication de cours ("explique", "c'est quoi",
   "pourquoi", "comment fonctionne") ET un résultat tiré des données (ex. "explique X, puis applique-le
   à la base"). Une simple question sur les données, même difficile, va à "sql" : XK7-SQL explique déjà
   sa requête en une phrase.
 - "hors_sujet" : la question ne porte ni sur les bases de données, ni sur le SQL, ni sur les données disponibles.
+  Les notions internes des SGBD (isolation, niveaux d'isolation, verrous, MVCC, transactions, concurrence,
+  journalisation, index, plans d'exécution) sont TOUJOURS des questions de cours ("rag"), jamais "hors_sujet",
+  même si la question ne cite pas les mots "base de données".
 
 En cas de doute :
 - entre "rag" et "hors_sujet", choisis "rag" : XK7-RAG dira lui-même s'il ne trouve rien dans ses documents ;
-- entre "sql" et "les_deux", choisis "sql".
+- entre "sql" et "les_deux", choisis "sql" ;
+- entre "sql" et "analyse", choisis "analyse" seulement si la question parle d'évolution, de tendance, de
+  répartition, de part, de comparaison, de lien ou de graphique ; sinon "sql".
 
-Base de données actuellement disponible pour "sql" et "qualite" : {source}
+Base de données actuellement disponible pour "sql", "qualite" et "analyse" : {source}
 Noms des tables : {tables}
 Si l'utilisateur a déposé un fichier, "le fichier", "l'Excel" ou "le document" désignent ce fichier, et non
 les ouvrages de XK7-RAG.
@@ -59,7 +75,7 @@ Questions précédentes de l'utilisateur (pour comprendre une question de suivi 
 Question : {question}
 
 Réponds uniquement avec un JSON :
-{{"agent": "rag" | "sql" | "qualite" | "les_deux" | "hors_sujet",
+{{"agent": "rag" | "sql" | "qualite" | "analyse" | "les_deux" | "hors_sujet",
   "raison": "une phrase courte",
   "question": "la question réécrite pour être compréhensible seule, sans l'historique"}}
 Pour "question" : si la question est une suite ("et en 2013 ?", "et ceux qui ont dépensé moins ?"), complète-la

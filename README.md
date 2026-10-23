@@ -6,7 +6,7 @@ Un assistant data multi-agent, déployé en ligne. Chaque agent est spécialisé
 |---|---|---|
 | XK7-RAG | Répond aux questions sur les bases de données et le SQL à partir d'une bibliothèque d'ouvrages, en citant ses sources | Terminé |
 | XK7-SQL | Interroge une base de données en français : écrit la requête SQL, l'exécute en lecture seule et affiche le résultat, sans jamais montrer les données au modèle | Terminé |
-| XK7-ANALYSE | Calculs, tendances et graphiques à partir des résultats SQL | À venir |
+| XK7-ANALYSE | Analyse une base (évolution, répartition, comparaison, classement, corrélation) et trace le graphique ; calculs et conclusion faits par le code, sans montrer les données au modèle | Terminé |
 | XK7-QUALITE | Contrôle la qualité des données (doublons, valeurs manquantes, formats, liens cassés, règles métier) et propose un script de correction, sans jamais l'exécuter | Terminé |
 | XK7-CORE | Agent chef (LangGraph) qui envoie chaque question au bon agent, ou découpe une question mixte et enchaîne les deux | Terminé |
 
@@ -24,7 +24,7 @@ L'accès est protégé par un mot de passe (chaque question appelle l'API OpenAI
 
 ## XK7-CORE : le chef d'orchestre
 
-XK7-CORE lit la question et décide qui doit répondre : XK7-RAG pour une question de cours ("C'est quoi une jointure externe ?"), XK7-SQL pour une question sur les données ("Quel genre musical se vend le mieux ?"), XK7-QUALITE pour un contrôle ("Vérifie la qualité des données", "Regarde mon fichier"), les deux pour une question mixte ("Explique le GROUP BY, puis donne le chiffre d'affaires par pays"), ou personne pour une question hors sujet.
+XK7-CORE lit la question et décide qui doit répondre : XK7-RAG pour une question de cours ("C'est quoi une jointure externe ?"), XK7-SQL pour une question sur les données ("Quel genre musical se vend le mieux ?"), XK7-QUALITE pour un contrôle ("Vérifie la qualité des données", "Regarde mon fichier"), XK7-ANALYSE pour une analyse avec graphique ("Comment évolue le chiffre d'affaires par mois ?"), les deux pour une question mixte ("Explique le GROUP BY, puis donne le chiffre d'affaires par pays"), ou personne pour une question hors sujet.
 
 Il est construit avec LangGraph, sous forme de graphe d'étapes :
 
@@ -36,6 +36,7 @@ flowchart LR
     R -->|mixte| S[Découpage]
     S --> RAG2[XK7-RAG] --> SQL2[XK7-SQL]
     R -->|contrôle| QUAL[XK7-QUALITE]
+    R -->|analyse| AN[XK7-ANALYSE]
     R -->|hors sujet| H[Refus]
 ```
 
@@ -47,17 +48,19 @@ flowchart LR
 
 ### Évaluation du routage
 
-34 questions : 7 de cours, 7 sur les données, 6 pièges ("Combien de types de jointures existe-t-il ?" est une question de cours malgré le "combien" ; "Comment écrire un UPDATE ?" aussi), 3 mixtes, 3 hors sujet, 2 questions de suivi et 6 questions ajoutées après les corrections du prompt.
+61 questions : cours, données, contrôles de qualité, analyses, questions mixtes, hors sujet, questions de suivi, demandes vagues sur un fichier déposé, et des pièges ("Combien de types de jointures existe-t-il ?" est une question de cours malgré le "combien" ; "Quel est le chiffre d'affaires par pays ?" reste une question pour XK7-SQL malgré le "par pays").
 
 | Mesure | Résultat |
 |---|---|
 | Premier essai (28 questions) | 26/28 |
 | Après correction du prompt (34 questions) | 34/34 |
 | Après ajout de XK7-QUALITE et des fichiers déposés (47 questions) | 47/47 (14 cours, 15 données, 10 qualité, 4 mixtes, 4 hors sujet) |
-| Dont questions ajoutées après correction | 6/6 |
+| Après ajout de XK7-ANALYSE (57 questions, premier essai) | 54/57 : 2 questions sur les données envoyées à l'analyse, 1 régression |
+| Après correction du prompt (61 questions) | 61/61 (16 cours, 18 données, 10 qualité, 9 analyse, 4 mixtes, 4 hors sujet) |
+| Dont questions écrites après les corrections | 10/10 |
 | Temps moyen par décision | environ 1 s |
 
-Les 6 dernières questions ont été écrites après les corrections, pour vérifier que les nouvelles règles marchent en général et pas seulement sur les questions qui les ont fait naître (éviter le surapprentissage du prompt).
+Après chaque correction, de nouvelles questions sont écrites, pour vérifier que les nouvelles règles marchent en général et pas seulement sur les questions qui les ont fait naître (éviter le surapprentissage du prompt).
 
 ### Ce que les tests de bout en bout ont révélé
 
@@ -67,7 +70,43 @@ Les 6 dernières questions ont été écrites après les corrections, pour véri
 4. Question de suivi refusée par XK7-SQL, qui n'a pas d'historique. Correction : le routeur réécrit la question pour qu'elle soit autonome.
 5. "Clients qui ont dépensé plus que la moyenne" : un lancement comparait le total de chaque client à la moyenne d'une facture, et renvoyait les 59 clients. Correction : règle sur le niveau d'agrégation dans le prompt de XK7-SQL, et question ajoutée à son évaluation.
 
+6. Ajout de XK7-ANALYSE : "Donne la durée moyenne des morceaux par genre" et "Quel genre se vend le mieux en France ?" partaient à l'analyse (le "par genre" suffisait à évoquer une répartition), et "l'isolation faible" retombait en hors sujet : le prompt plus long faisait oublier une règle au petit modèle. Correction : l'analyse exige un mot explicite (évolution, répartition, part, compare, lien, graphique...), et les notions internes des SGBD sont toujours du cours. Ajouter un agent modifie le comportement des autres : on relance toute l'évaluation, pas seulement les nouvelles questions.
+
 Leçon commune : chaque appel à un modèle est un point où le système peut dérailler, même pour une tâche simple comme découper une phrase. Les réponses des modèles sont donc toujours vérifiées par le code.
+
+## XK7-ANALYSE : l'analyse avec graphique
+
+XK7-ANALYSE répond aux questions d'analyse ("Comment évolue le chiffre d'affaires par mois ?", "Quelle est la répartition des clients par ville ?", "Y a-t-il un lien entre la durée d'un morceau et sa taille ?") par un graphique, un tableau et une conclusion chiffrée.
+
+### Le partage des rôles
+
+| Étape | Fait par | Détail |
+|---|---|---|
+| Choisir l'analyse | GPT-4o, à partir de la structure seule | Type (évolution, comparaison, classement, répartition, corrélation), colonnes, agrégation, période, et une requête SQL qui extrait les lignes de détail (sans GROUP BY) |
+| Extraire | le code | Même exécution que XK7-SQL : lecture seule, requête unique, limite de temps |
+| Calculer | pandas, en local | Regroupement par période ou catégorie, parts, histogramme, coefficient de corrélation (Pearson et rang) |
+| Conclure | le code | Phrases écrites à partir des chiffres : "Thé représente 35,1 % du total", "r = 0,96, liaison très forte et positive" |
+| Tracer | Altair dans Streamlit | Courbe sur un vrai axe de dates, barres dans l'ordre calculé, nuage de points |
+
+Le modèle n'écrit jamais la conclusion : il ne voit pas les chiffres, donc il ne peut ni les inventer ni les faire fuiter. La conclusion signale aussi les pièges de lecture : dernière période incomplète, moyenne tirée par quelques valeurs extrêmes, catégorie qui écrase les autres, et le rappel qu'une corrélation ne prouve pas une cause.
+
+### Robustesse
+
+- Un plan qui échoue (colonne absente, texte au lieu de nombres, requête invalide) est renvoyé au modèle avec l'erreur, deux corrections au maximum. Les messages d'erreur ne contiennent jamais de valeur de données.
+- Les petites maladresses fréquentes (colonne rangée en y au lieu de x, agrégation inconnue) sont réparées par le code au lieu de coûter un essai.
+- Une demande de modification est refusée, comme dans XK7-SQL.
+
+### Évaluation
+
+18 questions (12 sur Chinook, 6 sur un fichier de ventes déposé), chacune comparée à une requête SQL de référence : première ligne du résultat (étiquette et valeur, 1 % de tolérance), nombre de lignes des classements, coefficient de corrélation.
+
+| Mesure | Résultat |
+|---|---|
+| Premier essai | 17/18 (un histogramme en échec après 3 essais) |
+| Après normalisation des plans | 18/18, toutes du premier coup |
+| Données envoyées au modèle | aucune (noms, emails, prix et montants recherchés dans tous les prompts) |
+
+Fichiers : `analyse_agent.py`, `eval_analyse_questions.py`, `evaluate_analyse.py`.
 
 ## XK7-QUALITE : le contrôle des données
 
@@ -272,6 +311,8 @@ python evaluate.py         # évaluation de XK7-RAG
 python evaluate_sql.py     # évaluation de XK7-SQL
 python evaluate_router.py  # évaluation du routage de XK7-CORE
 python evaluate_quality.py # évaluation de XK7-QUALITE (crée les fichiers de test si besoin)
+python evaluate_analyse.py # évaluation de XK7-ANALYSE
+python analyse_agent.py    # quatre analyses de démonstration dans le terminal
 python quality_agent.py data/qualite_sale.xlsx   # rapport de qualité dans le terminal
 python core.py             # trois questions de démonstration dans le terminal
 python sql_agent.py        # tests de sécurité et quelques questions dans le terminal

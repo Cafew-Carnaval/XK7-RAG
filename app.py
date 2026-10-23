@@ -1,11 +1,13 @@
 import os
 import pandas as pd
+import altair as alt
 import streamlit as st
 from dotenv import load_dotenv
 from rag import answer, keep_cited, LEVELS, REFUS
 from sql_agent import ask, MAX_ROWS
 from core import run
 from quality_agent import check_quality, summary as quality_summary
+from analyse_agent import analyse as run_analysis
 from sql_schema import DB_PATH
 from data_upload import to_sqlite, delete_file, UploadError, MAX_SIZE_MB
 
@@ -21,10 +23,11 @@ AGENTS = {
     "rag": "Documentation",
     "sql": "Données",
     "qualite": "Qualité",
+    "analyse": "Analyse",
 }
 # Exemples cliquables sur l'écran d'accueil
 EXAMPLES = {
-    "core": ["C'est quoi une jointure externe ?", "Quel genre musical se vend le mieux ?",
+    "core": ["C'est quoi une jointure externe ?", "Comment évolue le chiffre d'affaires par année ?",
              "Explique le GROUP BY, puis donne le chiffre d'affaires par pays."],
     "rag": ["C'est quoi une jointure externe ?", "Quelles sont les règles de la deuxième forme normale ?",
             "À quoi sert un index partiel ?"],
@@ -32,14 +35,17 @@ EXAMPLES = {
             "Quels employés n'ont aucun client ?"],
     "qualite": ["Vérifie la qualité des données.", "Y a-t-il des doublons dans les clients ?",
                 "Les données des factures sont-elles fiables ?"],
+    "analyse": ["Comment évolue le chiffre d'affaires par année ?", "Quelle est la répartition des morceaux par genre ?",
+                "Y a-t-il un lien entre la durée d'un morceau et sa taille ?"],
 }
 WELCOME = {
     "core": "Pose une question de cours ou sur les données : le bon agent répond.",
     "rag": "Pose une question de cours sur les bases de données et le SQL.",
     "sql": "Pose une question sur les données : la requête SQL est écrite et exécutée pour toi.",
     "qualite": "Demande un contrôle : doublons, valeurs manquantes, formats, liens cassés, règles métier.",
+    "analyse": "Demande une analyse avec graphique : évolution, répartition, comparaison, lien entre deux valeurs.",
 }
-ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "qualite": "XK7-QUALITE", "les_deux": "XK7-RAG puis XK7-SQL",
+ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "qualite": "XK7-QUALITE", "analyse": "XK7-ANALYSE", "les_deux": "XK7-RAG puis XK7-SQL",
                 "hors_sujet": "aucun agent"}
 GRAVITY_ICONS = {"erreur": ":material/error:", "à vérifier": ":material/warning:", "info": ":material/info:"}
 
@@ -105,6 +111,58 @@ def show_message(msg, key):
     show_sources(msg.get("sources", []))
     show_sql_result(msg, key)
     show_quality(msg, key)
+    show_analysis(msg, key)
+
+
+def show_chart(chart):
+    """Graphique de XK7-ANALYSE, dans l'ordre calculé par le code (pas d'ordre alphabétique imposé)."""
+    if chart["kind"] == "scatter":
+        df = chart["data"].set_axis(["x", "y"], axis=1)
+        c = alt.Chart(df).mark_circle(opacity=0.5).encode(
+            x=alt.X("x:Q", title=chart["x"]), y=alt.Y("y:Q", title=chart["y"]))
+    else:
+        series = chart["data"]
+        df = pd.DataFrame({"label": series.index.astype(str), "value": series.values})
+        if chart["kind"] == "line":
+            c = alt.Chart(df).mark_line(point=True).encode(
+                x=alt.X("label:N", sort=None, title=series.index.name), y=alt.Y("value:Q", title=series.name),
+                tooltip=[alt.Tooltip("label:N", title=series.index.name), alt.Tooltip("value:Q", title=series.name)])
+        else:
+            c = alt.Chart(df).mark_bar().encode(
+                y=alt.Y("label:N", sort=None, title=series.index.name), x=alt.X("value:Q", title=series.name),
+                tooltip=[alt.Tooltip("label:N", title=series.index.name), alt.Tooltip("value:Q", title=series.name)]
+            ).properties(height=max(160, 26 * len(df)))
+    st.altair_chart(c.properties(title=chart.get("title", "")), width="stretch")
+
+
+def show_analysis(msg, key):
+    """Affiche le résultat de XK7-ANALYSE : graphique, tableau, téléchargement et requête d'extraction."""
+    result = msg.get("analysis")
+    if not result:
+        return
+    show_chart(result["chart"])
+    with st.expander("Tableau des résultats", icon=":material/table:"):
+        st.dataframe(result["table"], hide_index=True, width="stretch")
+        st.download_button("Télécharger en CSV", result["table"].to_csv(index=False).encode("utf-8"),
+                           file_name="analyse.csv", mime="text/csv", key=f"an_{key}", icon=":material/download:")
+    with st.expander("Requête d'extraction"):
+        st.caption(result.get("explication", ""))
+        st.code(result["sql"], language="sql")
+
+
+def analysis_message(result, db_label):
+    """Transforme un résultat de XK7-ANALYSE en message à afficher (conclusion écrite par le code, sans IA)."""
+    if result["type"] == "impossible":
+        return {"content": f"Je ne peux pas faire cette analyse : {result['erreur']}"}
+    if result["type"] == "refus":
+        return {"content": "Je ne peux pas faire ça : XK7-ANALYSE est en lecture seule, il ne modifie jamais les données."}
+    if result["type"] == "echec":
+        return {"content": "Je n'ai pas réussi à faire cette analyse. Essaie de préciser la mesure (ventes, "
+                           "chiffre d'affaires, quantités...) et le regroupement (par mois, par pays...)."}
+    lines = "  \n".join(f"- {line}" for line in result["conclusion"])
+    content = (f"**{result['titre']}**\n\n{lines}\n\n*Base : {db_label} · {result['lignes']} lignes analysées · "
+               "calculs en local, conclusion écrite par le code*")
+    return {"content": content, "analysis": {k: result[k] for k in ("chart", "table", "sql", "explication")}}
 
 
 def show_quality(msg, key):
@@ -185,7 +243,8 @@ with st.sidebar:
     agent = st.radio(
         "Agent", list(AGENTS), format_func=AGENTS.get,
         help="Automatique : XK7-CORE choisit l'agent. Documentation : XK7-RAG répond avec les ouvrages. "
-             "Données : XK7-SQL interroge la base. Qualité : XK7-QUALITE contrôle les données.",
+             "Données : XK7-SQL interroge la base. Qualité : XK7-QUALITE contrôle les données. "
+             "Analyse : XK7-ANALYSE trace un graphique et en tire une conclusion.",
     )
 
     st.divider()
@@ -206,7 +265,7 @@ with st.sidebar:
             help="Nombre d'extraits lus avant de répondre. 1 à 3 : réponse ciblée. 5 à 10 : utile si la "
                  "réponse est répartie dans les documents, ou si l'assistant ne trouve pas.",
         )
-    if agent in ("core", "sql", "qualite"):
+    if agent in ("core", "sql", "qualite", "analyse"):
         source = st.radio("Base interrogée", ["Base de démonstration", "Mon fichier"],
                           captions=["Chinook : une boutique de musique en ligne", "CSV, Excel ou SQLite"])
         if source == "Mon fichier":
@@ -241,7 +300,8 @@ with st.sidebar:
             "XK7 regroupe des agents IA spécialisés. XK7-CORE lit la question et choisit le bon agent, ou les "
             "enchaîne. XK7-RAG répond à partir d'une bibliothèque d'ouvrages sur les bases de données, en citant "
             "ses sources. XK7-SQL interroge une base de données en écrivant lui-même les requêtes SQL. "
-            "XK7-QUALITE contrôle la qualité des données et propose des règles métier."
+            "XK7-QUALITE contrôle la qualité des données et propose des règles métier. XK7-ANALYSE calcule une "
+            "évolution, une répartition ou une corrélation en local et trace le graphique."
         )
         st.caption(
             "Sources : un cours universitaire de SQL ; Database Design, A. Watt et N. Eng (CC BY 4.0) ; "
@@ -271,7 +331,7 @@ for i, msg in enumerate(st.session_state["messages"]):
             st.markdown(msg["content"])
 
 # --- Nouvelle question
-if agent in ("core", "sql", "qualite") and db_path is None:
+if agent in ("core", "sql", "qualite", "analyse") and db_path is None:
     st.info("Dépose un fichier dans la barre latérale pour commencer.")
 elif (question := st.chat_input("Pose ta question...") or pending):
     if st.session_state["nb_questions"] >= MAX_QUESTIONS:
@@ -311,6 +371,8 @@ elif (question := st.chat_input("Pose ta question...") or pending):
                 parts.append(sql_message(result["sql"], db_label))
             if result.get("qualite"):
                 parts.append(quality_message(result["qualite"], db_label))
+            if result.get("analyse"):
+                parts.append(analysis_message(result["analyse"], db_label))
             if result.get("message"):
                 parts.append({"content": result["message"]})
             new_msg = {"role": "assistant", "agent": chosen, **parts[0], "route": route_text,
@@ -325,6 +387,11 @@ elif (question := st.chat_input("Pose ta question...") or pending):
             with st.spinner("Contrôle de la qualité des données..."):
                 report = check_quality(question, db_path)
             new_msg = {"role": "assistant", "agent": "qualite", **quality_message(report, db_label)}
+            show_message(new_msg, len(st.session_state["messages"]))
+        elif agent == "analyse":
+            with st.spinner("Analyse des données..."):
+                result = run_analysis(question, db_path)
+            new_msg = {"role": "assistant", "agent": "analyse", **analysis_message(result, db_label)}
             show_message(new_msg, len(st.session_state["messages"]))
         elif agent == "rag":
             with st.spinner("Recherche dans les documents..."):
