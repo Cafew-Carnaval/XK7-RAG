@@ -1,4 +1,5 @@
 import os
+import contextvars
 import pandas as pd
 import altair as alt
 import streamlit as st
@@ -10,6 +11,7 @@ from quality_agent import check_quality, summary as quality_summary
 from analyse_agent import analyse as run_analysis
 from sql_schema import DB_PATH
 from data_upload import to_sqlite, delete_file, UploadError, MAX_SIZE_MB
+import router, core, sql_agent, quality_agent, analyse_agent
 
 load_dotenv()
 
@@ -59,6 +61,29 @@ CARDS = [
 GRAVITY_ICONS = {"erreur": ":material/error:", "à vérifier": ":material/warning:", "info": ":material/info:"}
 
 st.set_page_config(page_title="XK7", page_icon=":material/database:")
+
+# --- « Ce que l'IA a vu » : capture, pour CETTE session seulement, de tout ce qui est envoyé aux modèles.
+# Les journaux des agents sont partagés par tous les visiteurs de l'app en ligne : on les remplace par des
+# journaux qui ne gardent rien en commun et ne remplissent que la capture de la session en cours.
+CAPTURE = contextvars.ContextVar("xk7_capture", default=None)
+
+
+class SessionLog(list):
+    def __init__(self, agent):
+        super().__init__()
+        self.agent = agent
+
+    def append(self, prompt):
+        captured = CAPTURE.get()
+        if captured is not None:
+            captured.append({"agent": self.agent, "prompt": prompt})
+
+
+for module, name, label in [(router, "ROUTER_LOG", "XK7-CORE · routage"), (core, "SPLIT_LOG", "XK7-CORE · découpage"),
+                            (sql_agent, "PROMPT_LOG", "XK7-SQL"), (quality_agent, "RULES_LOG", "XK7-QUALITE"),
+                            (analyse_agent, "PLAN_LOG", "XK7-ANALYSE")]:
+    if not isinstance(getattr(module, name), SessionLog):
+        setattr(module, name, SessionLog(label))
 
 # --- Mot de passe : demandé seulement s'il est défini (dans .env ou dans les secrets en ligne)
 password = os.getenv("APP_PASSWORD")
@@ -127,6 +152,24 @@ def show_message(msg, key):
     show_sql_result(msg, key)
     show_quality(msg, key)
     show_analysis(msg, key)
+    show_sent(msg)
+
+
+def show_sent(msg):
+    """Ce que l'IA a vu : les prompts exacts envoyés aux modèles pour cette réponse."""
+    if "sent" not in msg:
+        return
+    with st.expander("Ce que l'IA a vu", icon=":material/visibility:"):
+        st.caption("Le texte exact envoyé aux modèles pour cette réponse : ta question, la structure de la base "
+                   "(noms des tables et des colonnes, nombre de lignes) et les consignes. Aucune valeur de la base, aucun résultat.")
+        if msg.get("agent_rag"):
+            st.caption("XK7-RAG envoie aussi ta question et des passages des ouvrages de la bibliothèque "
+                       "(jamais de données de la base).")
+        if not msg["sent"]:
+            st.caption("Aucun appel à un modèle pour cette réponse.")
+        for i, item in enumerate(msg["sent"], 1):
+            st.markdown(f"**{i}. {item['agent']}** · {len(item['prompt'])} caractères")
+            st.code(item["prompt"], language="text", wrap_lines=True)
 
 
 def show_chart(chart):
@@ -272,6 +315,21 @@ def conversation_markdown():
     return "\n".join(lines)
 
 
+def easter_egg():
+    """/kalinka : la bande-son de XK7 et son tableau d'honneur (scores de toutes les évaluations)."""
+    with st.chat_message("assistant", avatar=":material/music_note:"):
+        st.markdown("**Kalinka, version XK7** · 8-bit, 160 ans de domaine public, arrangement maison")
+        song = os.path.join("assets", "xk7_kalinka.mp3")
+        if os.path.exists(song):
+            st.audio(song, autoplay=True)
+        st.markdown("**Tableau d'honneur**")
+        for col, (label, value) in zip(st.columns(4), [("Routage", "61/61"), ("SQL", "27/27"),
+                                                        ("Qualité", "21/21"), ("Analyse", "18/18")]):
+            col.metric(label, value)
+        st.caption("Données envoyées aux modèles pendant toutes ces évaluations : aucune.")
+    st.balloons()
+
+
 def reset_upload():
     """Supprime le fichier temporaire de l'utilisateur."""
     if st.session_state["upload"]:
@@ -398,7 +456,9 @@ for i, msg in enumerate(st.session_state["messages"]):
 # --- Nouvelle question
 if agent in ("core", "sql", "qualite", "analyse") and db_path is None:
     st.info("Dépose un fichier dans la barre latérale pour commencer.")
-elif (question := st.chat_input("Pose ta question...") or pending):
+elif (question := st.chat_input("Pose ta question...") or pending) and question.strip().lower() == "/kalinka":
+    easter_egg()
+elif question:
     if st.session_state["nb_questions"] >= MAX_QUESTIONS:
         st.warning("Limite de questions atteinte pour cette visite.")
         st.stop()
@@ -411,6 +471,8 @@ elif (question := st.chat_input("Pose ta question...") or pending):
     with st.chat_message("user", avatar=AVATARS["user"]):
         st.markdown(question)
 
+    captured = []                       # tout ce qui sera envoyé aux modèles pendant cette réponse
+    CAPTURE.set(captured)
     with st.chat_message("assistant", avatar=AVATARS["assistant"]):
         if agent == "core":
             with st.spinner("XK7-CORE choisit l'agent..."):
@@ -471,6 +533,11 @@ elif (question := st.chat_input("Pose ta question...") or pending):
             new_msg = {"role": "assistant", "agent": "sql", **sql_message(result, db_label)}
             show_message(new_msg, len(st.session_state["messages"]))
 
+        new_msg["sent"] = list(captured)
+        new_msg["agent_rag"] = new_msg.get("badge") == "XK7-RAG" or any(
+            p.get("badge") == "XK7-RAG" for p in new_msg.get("parts", []))
+        show_sent(new_msg)
+    CAPTURE.set(None)
     st.session_state["messages"].append(new_msg)
     if pending:
         st.rerun()   # efface l'écran d'accueil après un exemple cliqué

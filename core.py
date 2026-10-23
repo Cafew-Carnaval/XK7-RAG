@@ -31,6 +31,9 @@ Question : {question}
 JSON :"""
 
 
+SPLIT_LOG = []   # ce qui est envoyé au modèle de découpage
+
+
 def plain(text):
     """Clé simplifiée : minuscules, sans accents ("Données" -> "donnees")."""
     return unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode().lower().strip()
@@ -72,7 +75,9 @@ def split_node(state):
     """Pour une question mixte : sépare la partie cours et la partie données.
     Le modèle ne voit que la question, jamais de données."""
     question = state.get("standalone") or state["question"]
-    raw = split_llm.invoke(SPLIT_PROMPT.format(question=question)).content
+    prompt = SPLIT_PROMPT.format(question=question)
+    SPLIT_LOG.append(prompt)
+    raw = split_llm.invoke(prompt).content
     try:
         parts = {plain(k): str(v).strip() for k, v in json.loads(raw).items()}
     except (ValueError, AttributeError):

@@ -10,6 +10,7 @@ load_dotenv()
 router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0,
                         model_kwargs={"response_format": {"type": "json_object"}})
 
+ROUTER_LOG = []   # ce qui est envoyé au modèle de routage (affiché dans « Ce que l'IA a vu »)
 AGENTS = ("rag", "sql", "qualite", "analyse", "les_deux", "hors_sujet")
 
 ROUTER_PROMPT = """Tu es XK7-CORE, le chef d'orchestre d'un assistant data. Tu ne réponds jamais toi-même :
@@ -104,6 +105,7 @@ def route(question, history=None, db_path=DB_PATH, source="la base de démonstra
         history="\n".join(f"- {q}" for q in previous) or "(aucune)",
         question=question,
     )
+    ROUTER_LOG.append(prompt)
     raw = router_llm.invoke(prompt).content
     try:
         decision = json.loads(raw)
