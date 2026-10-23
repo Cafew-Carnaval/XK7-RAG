@@ -47,6 +47,15 @@ WELCOME = {
 }
 ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "qualite": "XK7-QUALITE", "analyse": "XK7-ANALYSE", "les_deux": "XK7-RAG puis XK7-SQL",
                 "hors_sujet": "aucun agent"}
+# Couleurs du thème XK7 (voir .streamlit/config.toml), reprises dans les graphiques
+XK7 = {"orange": "#FF8A3D", "rose": "#F5A3C7", "texte": "#F4EEF2", "grille": "#3A2533"}
+# Cartes de l'écran d'accueil en mode automatique : icône, nom, rôle, exemple
+CARDS = [
+    (":material/menu_book:", "Documentation", "Cours et documentation SQL", "C'est quoi une jointure externe ?"),
+    (":material/table_view:", "Données", "Questions en français sur la base", "Quels sont les 5 clients qui ont le plus dépensé ?"),
+    (":material/fact_check:", "Qualité", "Doublons, trous, incohérences", "Vérifie la qualité des données."),
+    (":material/monitoring:", "Analyse", "Évolutions, répartitions, liens", "Comment évolue le chiffre d'affaires par année ?"),
+]
 GRAVITY_ICONS = {"erreur": ":material/error:", "à vérifier": ":material/warning:", "info": ":material/info:"}
 
 st.set_page_config(page_title="XK7", page_icon=":material/database:")
@@ -93,7 +102,11 @@ def show_sql_result(msg, key):
     if not msg.get("columns"):
         return
     df = pd.DataFrame(msg["rows"], columns=msg["columns"])
-    st.dataframe(df, hide_index=True, width="stretch")
+    if df.shape == (1, 1):                       # une seule valeur ("combien de...") : affichée en gros
+        value = df.iloc[0, 0]
+        st.metric(df.columns[0], f"{value:,}".replace(",", " ") if isinstance(value, (int, float)) else value)
+    else:
+        st.dataframe(df, hide_index=True, width="stretch")
     if msg.get("truncated"):
         st.caption(f"Résultat limité aux {MAX_ROWS} premières lignes.")
     st.download_button("Télécharger en CSV", df.to_csv(index=False).encode("utf-8"),
@@ -107,6 +120,8 @@ def show_message(msg, key):
     """Affiche une réponse : choix de XK7-CORE, partie cours, partie données."""
     if msg.get("route"):
         st.caption(f":material/alt_route: XK7-CORE → {msg['route']}")
+    if msg.get("badge"):
+        st.markdown(f":orange-badge[{msg['badge']}]")
     st.markdown(msg["content"])
     show_sources(msg.get("sources", []))
     show_sql_result(msg, key)
@@ -118,21 +133,33 @@ def show_chart(chart):
     """Graphique de XK7-ANALYSE, dans l'ordre calculé par le code (pas d'ordre alphabétique imposé)."""
     if chart["kind"] == "scatter":
         df = chart["data"].set_axis(["x", "y"], axis=1)
-        c = alt.Chart(df).mark_circle(opacity=0.5).encode(
+        c = alt.Chart(df).mark_circle(opacity=0.45, color=XK7["orange"]).encode(
             x=alt.X("x:Q", title=chart["x"]), y=alt.Y("y:Q", title=chart["y"]))
     else:
         series = chart["data"]
-        df = pd.DataFrame({"label": series.index.astype(str), "value": series.values})
         if chart["kind"] == "line":
-            c = alt.Chart(df).mark_line(point=True).encode(
-                x=alt.X("label:N", sort=None, title=series.index.name), y=alt.Y("value:Q", title=series.name),
-                tooltip=[alt.Tooltip("label:N", title=series.index.name), alt.Tooltip("value:Q", title=series.name)])
+            # Axe des dates : le graphique n'affiche que quelques étiquettes lisibles, même sur 60 mois
+            df = pd.DataFrame({"label": series.index, "value": series.values})
+            date_format = chart.get("format", "%m/%Y")
+            points = {"filled": True, "color": XK7["rose"], "size": 45} if len(df) <= 36 else False
+            c = alt.Chart(df).mark_line(color=XK7["orange"], strokeWidth=3, point=points).encode(
+                x=alt.X("label:T", title=series.index.name, axis=alt.Axis(format=date_format, labelAngle=0, labelOverlap="greedy", tickCount=8)),
+                y=alt.Y("value:Q", title=series.name),
+                tooltip=[alt.Tooltip("label:T", title=series.index.name, format=date_format),
+                         alt.Tooltip("value:Q", title=series.name, format=",.2f")])
         else:
-            c = alt.Chart(df).mark_bar().encode(
+            df = pd.DataFrame({"label": series.index.astype(str), "value": series.values})
+            c = alt.Chart(df).mark_bar(color=XK7["orange"], cornerRadiusEnd=4).encode(
                 y=alt.Y("label:N", sort=None, title=series.index.name), x=alt.X("value:Q", title=series.name),
                 tooltip=[alt.Tooltip("label:N", title=series.index.name), alt.Tooltip("value:Q", title=series.name)]
             ).properties(height=max(160, 26 * len(df)))
-    st.altair_chart(c.properties(title=chart.get("title", "")), width="stretch")
+    c = (c.properties(title=chart.get("title", ""))
+         .configure(background="transparent", font="sans-serif")
+         .configure_axis(labelColor=XK7["rose"], titleColor=XK7["rose"], gridColor=XK7["grille"],
+                         domainColor=XK7["grille"], tickColor=XK7["grille"], labelFontSize=12, titleFontSize=12)
+         .configure_title(color=XK7["texte"], fontSize=15, anchor="start")
+         .configure_view(strokeWidth=0))
+    st.altair_chart(c, width="stretch", theme=None)
 
 
 def show_analysis(msg, key):
@@ -140,6 +167,9 @@ def show_analysis(msg, key):
     result = msg.get("analysis")
     if not result:
         return
+    metrics = result["chart"].get("metrics", [])
+    for col, m in zip(st.columns(len(metrics)) if metrics else [], metrics):
+        col.metric(m["label"], m["value"], m.get("delta"), delta_color=m.get("delta_color", "normal"))
     show_chart(result["chart"])
     with st.expander("Tableau des résultats", icon=":material/table:"):
         st.dataframe(result["table"], hide_index=True, width="stretch")
@@ -153,16 +183,17 @@ def show_analysis(msg, key):
 def analysis_message(result, db_label):
     """Transforme un résultat de XK7-ANALYSE en message à afficher (conclusion écrite par le code, sans IA)."""
     if result["type"] == "impossible":
-        return {"content": f"Je ne peux pas faire cette analyse : {result['erreur']}"}
+        return {"badge": "XK7-ANALYSE", "content": f"Je ne peux pas faire cette analyse : {result['erreur']}"}
     if result["type"] == "refus":
-        return {"content": "Je ne peux pas faire ça : XK7-ANALYSE est en lecture seule, il ne modifie jamais les données."}
+        return {"badge": "XK7-ANALYSE", "content": "Je ne peux pas faire ça : XK7-ANALYSE est en lecture seule, il ne modifie jamais les données."}
     if result["type"] == "echec":
-        return {"content": "Je n'ai pas réussi à faire cette analyse. Essaie de préciser la mesure (ventes, "
+        return {"badge": "XK7-ANALYSE", "content": "Je n'ai pas réussi à faire cette analyse. Essaie de préciser la mesure (ventes, "
                            "chiffre d'affaires, quantités...) et le regroupement (par mois, par pays...)."}
     lines = "  \n".join(f"- {line}" for line in result["conclusion"])
     content = (f"**{result['titre']}**\n\n{lines}\n\n*Base : {db_label} · {result['lignes']} lignes analysées · "
                "calculs en local, conclusion écrite par le code*")
-    return {"content": content, "analysis": {k: result[k] for k in ("chart", "table", "sql", "explication")}}
+    return {"badge": "XK7-ANALYSE", "content": content,
+            "analysis": {k: result[k] for k in ("chart", "table", "sql", "explication")}}
 
 
 def show_quality(msg, key):
@@ -208,20 +239,37 @@ def show_quality(msg, key):
 def quality_message(report, db_label):
     """Transforme un rapport de XK7-QUALITE en message à afficher (résumé écrit par le code, sans IA)."""
     text = quality_summary(report).replace("\n- ", "  \n- ")
-    return {"content": f"{text}\n\n*Base : {db_label} · contrôles faits en local, seules les règles métier "
-                       "sont proposées par le modèle à partir de la structure*", "quality": report}
+    return {"badge": "XK7-QUALITE", "content": f"{text}\n\n*Base : {db_label} · contrôles faits en local, seules les "
+                       "règles métier sont proposées par le modèle à partir de la structure*", "quality": report}
 
 
 def sql_message(result, db_label):
     """Transforme un résultat de XK7-SQL en message à afficher."""
     if not result["ok"]:
-        return {"content": result["message"]}
+        return {"badge": "XK7-SQL", "content": result["message"]}
     n = len(result["rows"])
     content = f"{result['explanation']}\n\n*Base : {db_label} · {n} ligne{'s' if n > 1 else ''}*"
     if result.get("warning"):
         content += f"\n\n**{result['warning']}**"
-    return {"content": content, "sql": result["sql"], "columns": result["columns"],
+    return {"badge": "XK7-SQL", "content": content, "sql": result["sql"], "columns": result["columns"],
             "rows": result["rows"], "truncated": result["truncated"]}
+
+
+def conversation_markdown():
+    """La conversation en Markdown : questions, réponses et requêtes SQL (pas les tableaux de données)."""
+    lines = ["# Conversation XK7", ""]
+    for msg in st.session_state["messages"]:
+        if msg["role"] == "user":
+            lines += [f"## {msg['content']}", ""]
+            continue
+        for part in [msg] + msg.get("parts", []):
+            if part.get("badge"):
+                lines.append(f"**{part['badge']}**")
+            lines += [part["content"], ""]
+            sql = part.get("sql") or (part.get("analysis") or {}).get("sql")
+            if sql:
+                lines += ["```sql", sql, "```", ""]
+    return "\n".join(lines)
 
 
 def reset_upload():
@@ -294,6 +342,11 @@ with st.sidebar:
                  "conservé. XK7-SQL ne peut ni modifier ni supprimer de données.",
         )
 
+    if st.session_state["messages"]:
+        st.download_button("Exporter la conversation", conversation_markdown().encode("utf-8"),
+                           file_name="conversation_xk7.md", mime="text/markdown", width="stretch",
+                           icon=":material/download:")
+
     st.divider()
     with st.expander("À propos"):
         st.caption(
@@ -312,13 +365,25 @@ with st.sidebar:
 
 # --- Écran d'accueil
 st.title("XK7")
+if agent != "rag" and db_path:
+    st.caption(f":material/database: {db_label}")
 pending = None
 if not st.session_state["messages"]:
     st.markdown(WELCOME[agent])
-    st.caption("Exemples :")
-    for i, example in enumerate(EXAMPLES[agent]):
-        if st.button(example, key=f"ex_{agent}_{i}", icon=":material/arrow_forward:"):
-            pending = example
+    if agent == "core":
+        # Une carte par agent : ce qu'il fait et un exemple à cliquer
+        for row in (CARDS[:2], CARDS[2:]):
+            for col, (icon, name, role, example) in zip(st.columns(2), row):
+                with col.container(border=True):
+                    st.markdown(f"{icon} **{name}**")
+                    st.caption(role)
+                    if st.button(example, key=f"card_{name}", width="stretch"):
+                        pending = example
+    else:
+        st.caption("Exemples :")
+        for i, example in enumerate(EXAMPLES[agent]):
+            if st.button(example, key=f"ex_{agent}_{i}", icon=":material/arrow_forward:"):
+                pending = example
 
 # --- Historique de la conversation
 for i, msg in enumerate(st.session_state["messages"]):
@@ -366,7 +431,7 @@ elif (question := st.chat_input("Pose ta question...") or pending):
             if result.get("rag"):
                 reply = result["rag"]["reply"]
                 sources = [] if REFUS in reply else keep_cited(result["rag"]["hits"], reply)
-                parts.append({"content": reply, "sources": sources})
+                parts.append({"badge": "XK7-RAG", "content": reply, "sources": sources})
             if result.get("sql"):
                 parts.append(sql_message(result["sql"], db_label))
             if result.get("qualite"):
@@ -398,7 +463,7 @@ elif (question := st.chat_input("Pose ta question...") or pending):
                 reply, hits = answer(question, k=k, history=history, level=level)
             # On ne garde que les passages réellement cités dans la réponse
             sources = [] if REFUS in reply else keep_cited(hits, reply)
-            new_msg = {"role": "assistant", "agent": "rag", "content": reply, "sources": sources}
+            new_msg = {"role": "assistant", "agent": "rag", "badge": "XK7-RAG", "content": reply, "sources": sources}
             show_message(new_msg, len(st.session_state["messages"]))
         else:
             with st.spinner("Écriture et exécution de la requête..."):

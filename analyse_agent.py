@@ -193,12 +193,18 @@ def analyse_evolution(df, plan):
                          f"{'+' if b >= a else ''}{pct((b - a) / a)} par rapport à la 1re).")
     # Dernière période incomplète (ex. un mois dont les données s'arrêtent le 5) : la comparaison serait trompeuse
     # (on ne le signale que s'il manque plus de 10 % de la période : 9 jours sur une année, ce n'est rien)
-    last = series.index[-1]
-    covered = (dates.max() - last.start_time) / (last.end_time - last.start_time)
+    last_period = series.index[-1]
+    covered = (dates.max() - last_period.start_time) / (last_period.end_time - last_period.start_time)
     if covered < 0.9 and len(series) > 2:
         lines.append(f"Attention : la dernière période ({series.index[-1].strftime(label)}) semble incomplète "
                      f"(données jusqu'au {dates.max().strftime('%d/%m/%Y')}), sa valeur est donc sous-estimée.")
-    chart = {"kind": "line", "data": table.set_index("Période")[series.name]}
+    # Pour le graphique : de vraies dates (l'axe choisit lui-même combien d'étiquettes afficher)
+    timeline = pd.Series(series.values, index=series.index.to_timestamp(), name=series.name).rename_axis("Période")
+    chart = {"kind": "line", "data": timeline, "format": label,
+             "metrics": [{"label": f"Début ({series.index[0].strftime(label)})", "value": fmt(first)},
+                         {"label": f"Fin ({series.index[-1].strftime(label)})", "value": fmt(last),
+                          "delta": f"{'+' if last >= first else ''}{pct((last - first) / first)}" if first else None},
+                         {"label": f"Plus haut ({best.strftime(label)})", "value": fmt(series.max())}]}
     return table, chart, lines
 
 
@@ -229,7 +235,12 @@ def analyse_comparaison(df, plan, top=None):
                      if series[low] > 0 else f"Le plus faible : {low} ({fmt(series[low])}).")
     if len(series) > len(shown):
         lines.append(f"Seules les {len(shown)} premières catégories sur {len(series)} sont affichées.")
-    chart = {"kind": "bar", "data": shown}
+    chart = {"kind": "bar", "data": shown,
+             "metrics": [{"label": "En tête", "value": str(shown.index[0]), "delta": fmt(shown.iloc[0]),
+                          "delta_color": "off"},
+                         {"label": "Catégories", "value": str(len(series))}]}
+    if agg != "moyenne" and total and not ascending:
+        chart["metrics"].append({"label": "Part du premier", "value": pct(shown.iloc[0] / total)})
     return table, chart, lines
 
 
@@ -256,7 +267,10 @@ def analyse_repartition(df, plan):
                      f"({pct(top_bin['Nombre'] / len(values))} des valeurs).")
         if values.mean() > values.median() * 1.2:
             lines.append("La moyenne est nettement au-dessus de la médiane : quelques valeurs élevées tirent la moyenne.")
-        chart = {"kind": "bar", "data": table.set_index("Tranche")["Nombre"]}
+        chart = {"kind": "bar", "data": table.set_index("Tranche")["Nombre"],
+                 "metrics": [{"label": "Valeurs", "value": fmt(len(values))},
+                             {"label": "Moyenne", "value": fmt(values.mean())},
+                             {"label": "Médiane", "value": fmt(values.median())}]}
         return table, chart, lines
 
     series = aggregate(df, plan, df[x].astype("string").str.strip()).sort_values(ascending=False)
@@ -269,7 +283,12 @@ def analyse_repartition(df, plan):
         lines.append(f"Les 3 premiers font {pct(shares.head(3).sum())} du total.")
     if shares.iloc[0] > 0.5:
         lines.append("Une seule catégorie fait plus de la moitié du total : la répartition est très concentrée.")
-    chart = {"kind": "bar", "data": (shares.head(15) * 100).rename("Part (%)")}
+    chart = {"kind": "bar", "data": (shares.head(15) * 100).rename("Part (%)"),
+             "metrics": [{"label": "Plus grande part", "value": str(series.index[0]), "delta": pct(shares.iloc[0]),
+                          "delta_color": "off"},
+                         {"label": "Catégories", "value": str(len(series))}]}
+    if len(series) > 3:
+        chart["metrics"].append({"label": "Part des 3 premiers", "value": pct(shares.head(3).sum())})
     return table, chart, lines
 
 
@@ -295,7 +314,10 @@ def analyse_correlation(df, plan):
     lines.append("Une corrélation ne prouve pas que l'une des valeurs est la cause de l'autre.")
     table = data.describe().loc[["mean", "min", "max"]].rename(index={"mean": "Moyenne", "min": "Min", "max": "Max"})
     sample = data.sample(min(len(data), 2000), random_state=0)
-    chart = {"kind": "scatter", "data": sample, "x": x, "y": y, "r": r}
+    chart = {"kind": "scatter", "data": sample, "x": x, "y": y, "r": r,
+             "metrics": [{"label": "Corrélation (r)", "value": fmt(r, 2), "delta": strength(r).split(" et ")[0],
+                          "delta_color": "off"},
+                         {"label": "Lignes", "value": fmt(len(data))}]}
     return table.reset_index(names="Mesure"), chart, lines
 
 
