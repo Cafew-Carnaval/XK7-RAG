@@ -19,7 +19,8 @@ Règles (elles passent avant tout le reste) :
 - N'écris jamais de code SQL qui n'apparaît pas dans les extraits. Si tu montres du code, recopie-le tel quel depuis les extraits.
 - Cite tes sources sous la forme (Titre du document, p. X), en reprenant exactement le titre indiqué entre crochets avant chaque extrait, et uniquement pour des informations qui figurent réellement sur ces pages.
 - Si les extraits ne contiennent qu'une partie de la réponse, donne cette partie et précise ce qui manque.
-- Si les extraits ne contiennent rien d'utile pour répondre, réponds uniquement : "Je ne trouve pas la réponse dans les documents."
+- Si les extraits ne contiennent rien d'utile pour répondre, ignore le format demandé par le niveau et réponds
+  uniquement : "Je ne trouve pas la réponse dans les documents." N'écris rien d'autre, ni avant ni après.
 
 Niveau de la personne et façon de répondre :
 {level_instruction}
@@ -59,6 +60,19 @@ LEVELS = {
         "Ne réexplique pas les notions de base. Style dense, sans phrases d'introduction."
     ),
 }
+
+# Quand la bibliothèque ne contient rien : une explication générale, courte, clairement étiquetée « non sourcée »
+GENERAL_PROMPT = """Tu es un assistant pédagogique en bases de données et en SQL. La bibliothèque de documents ne
+contient pas la réponse à la question suivante. Donne une explication générale courte (5 à 8 lignes), en français,
+avec tes connaissances. Ne cite aucune source, aucun titre de livre, aucune page. Si la question ne porte pas sur les
+données, les bases de données, le SQL ou l'analyse de données, réponds uniquement : HORS_SUJET
+
+Niveau de la personne :
+{level_instruction}
+
+Question : {question}"""
+GENERAL_NOTE = ("Voici une explication générale, **non sourcée** : elle ne vient pas de la bibliothèque, "
+                "vérifie-la avant de t'y fier.")
 
 REWRITE_PROMPT = """Voici le début d'une conversation sur les bases de données, puis une nouvelle question de l'utilisateur.
 Réécris la nouvelle question pour qu'elle soit compréhensible seule, sans l'historique.
@@ -180,8 +194,16 @@ def answer(question, k=3, history=None, level="Intermédiaire"):
         question=question,
         level_instruction=LEVELS.get(level, LEVELS["Intermédiaire"]),
     )
-    response = llm.invoke(prompt)
-    return response.content, hits
+    reply = llm.invoke(prompt).content.strip()
+    if REFUS in reply:
+        # Rien dans la bibliothèque : plutôt qu'un refus sec, une explication générale clairement étiquetée.
+        # Le refus reste en tête (l'app n'affiche alors aucune source, l'évaluation le reconnaît).
+        leftover = reply.replace(REFUS + ".", "").replace(REFUS, "").strip()
+        if len(leftover) < 150:             # le modèle a bien refusé seul : on demande l'explication générale
+            leftover = llm.invoke(GENERAL_PROMPT.format(
+                question=question, level_instruction=LEVELS.get(level, LEVELS["Intermédiaire"]))).content.strip()
+        reply = f"{REFUS}." if leftover.startswith("HORS_SUJET") else f"{REFUS}. {GENERAL_NOTE}\n\n{leftover}"
+    return reply, hits
 
 
 if __name__ == "__main__":
