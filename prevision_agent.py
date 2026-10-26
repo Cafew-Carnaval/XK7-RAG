@@ -288,7 +288,7 @@ def context_lines(series, periode, target_name):
     peak, low = series.idxmax(), series.idxmin()
     lines = [f"De {label(series.index[0], periode)} à {label(series.index[-1], periode)}, « {target_name} » passe de "
              f"{fmt(first)} à {fmt(last)} ({'+' if last >= first else ''}{pct((last - first) / first) if first else '?'})."]
-    if peak not in (series.index[0], series.index[-1]):
+    if peak not in (series.index[0], series.index[-1]) and series.max() > last * 1.01:
         lines.append(f"Point le plus haut : {label(peak, periode)} ({fmt(series.max())}), soit "
                      f"{pct((last - series.max()) / series.max())} entre ce sommet et la dernière période.")
     season = PERIODS[periode][2]
@@ -360,10 +360,17 @@ def run_time_forecast(df, date_col, target_col, agregation="mediane", periode="m
     season = PERIODS[periode][2]
     out = {"serie": series, "niveau": level, "periode": periode, "cible": target_name,
            "contexte": context_lines(series, periode, target_name), "distribution": None}
+    per_period = pd.to_datetime(df[date_col], errors="coerce").dt.to_period(PERIODS[periode][0]).value_counts()
+    sparse = agregation in ("mediane", "moyenne") and per_period.median() < 10
+    sparse_note = (f"Attention : environ {fmt(per_period.median())} ligne(s) par période seulement. La "
+                   f"{'médiane' if agregation == 'mediane' else 'moyenne'} de chaque période dépend de quelques "
+                   "ventes et varie beaucoup par hasard : la prévision est forcément imprécise."
+                   + (" Conseil : relance par trimestre (dans les réglages) pour regrouper plus de lignes."
+                      if periode == "mois" else "")) if sparse else None
     if agregation != "nombre":
         out["distribution"] = pd.to_numeric(df[target_col], errors="coerce").dropna()
     if level == "aucune":
-        out["synthese"] = out["contexte"] + [
+        out["synthese"] = out["contexte"] + ([sparse_note] if sparse_note else []) + [
             f"Pas de prévision : il faut au moins {MIN_HISTORY[periode][0]} périodes d'historique, le fichier en "
             f"compte {len(series)}. Voici l'évolution observée."]
         return out
@@ -388,7 +395,7 @@ def run_time_forecast(df, date_col, target_col, agregation="mediane", periode="m
                                   "Réel": values[-n_test:], **{m: results[m]["predictions"] for m in results}}),
         "prevision": pd.DataFrame({"Période": future, "Prévision": fc, "Bas": low, "Haut": high}),
         "synthese": synthesis(series, periode, target_name, best, results, key, beats_naive, fc, low, high, level,
-                              season_info),
+                              season_info) + ([sparse_note] if sparse_note else []),
     })
     return out
 
@@ -406,7 +413,10 @@ Deux modes :
   6 prochains mois", "combien de commandes le mois prochain ?").
 - "caracteristiques" : estimer une valeur à partir de caractéristiques ("combien vaut un T3 de 65 m² à Rezé ?",
   "quel prix pour une maison de 120 m² avec jardin ?").
-Si la question ne demande pas une prévision ou une estimation sur ces données, mode = "impossible".
+Si la question ne demande pas une prévision ou une estimation, ou si aucune colonne de la structure ne correspond
+à ce qu'elle demande, mode = "impossible". Mais tu ne connais pas les VALEURS des données : ne réponds jamais
+"impossible" parce qu'une ville, une catégorie ou un produit ne serait pas dans la base. Filtre avec LIKE : le
+programme vérifiera lui-même s'il trouve des lignes.
 
 Pour le mode "temps" :
 - date : la colonne de date ; cible : la colonne numérique à prévoir (null pour compter des lignes).
@@ -417,7 +427,8 @@ Pour le mode "temps" :
 - horizon : le nombre de périodes à prévoir (6 mois par défaut, 4 trimestres par défaut, 12 au maximum).
 - La requête renvoie des lignes de détail, SANS GROUP BY, SANS SUM, AVG ou COUNT, SANS LIMIT, avec les filtres de
   la question (type de bien, ville...). Une valeur calculée par ligne est permise (ex. quantité * prix AS "Montant").
-- Donne un nom lisible en français à chaque colonne avec AS ; date et cible sont ces noms lisibles.
+- Donne un nom lisible en français à chaque colonne avec AS, d'après ce qu'elle mesure (ex. AS "Prix au m²",
+  AS "Date de vente"), jamais AS "Cible", AS "Valeur" ou AS "Date" ; date et cible sont ces noms lisibles.
 
 Règles SQL : une seule requête SELECT (ou WITH ... SELECT) ; noms exacts de la structure, entre guillemets doubles
 s'ils contiennent des espaces, des accents ou une apostrophe ; jointures par les liens "->" ou les colonnes de même
@@ -485,6 +496,21 @@ def extract(plan, db_path):
     return df, truncated
 
 
+GENERIC_NAMES = {"cible", "valeur", "value", "target", "y", "date", "montant"}
+
+
+def source_name(alias, sql):
+    """Si le modèle a appelé une colonne « Cible » ou « Date », on retrouve dans le SELECT la vraie colonne
+    qu'elle renomme (ex. "Prix au m² (€)" AS "Cible") : un nom qui veut dire quelque chose pour l'utilisateur."""
+    if not alias or str(alias).strip().lower() not in GENERIC_NAMES or not sql:
+        return alias
+    # Seulement une colonne renommée telle quelle (juste après SELECT ou une virgule), pas un calcul :
+    # "Quantité" * "Prix" AS "Cible" n'est pas « Prix »
+    match = re.search(r'(?:SELECT|,)\s*(?:\w+\.)?("[^"]+"|\w+)\s+AS\s+"?' + re.escape(str(alias)) + r'"?',
+                      sql, re.IGNORECASE)
+    return match.group(1).strip('"') if match else alias
+
+
 def readable(name):
     """Nom de colonne lisible, même si le modèle a écrit « prix_au_m2 » malgré la consigne : « Prix au m² »."""
     text = re.sub(r"_+", " ", str(name or "")).strip()
@@ -498,7 +524,7 @@ def run_plan(plan, df):
     plan = normalize_plan(dict(plan))
     target = plan.get("cible") or plan["date"]
     line = str(plan.get("ligne") or "").strip()
-    name = readable(plan.get("cible")) or (f"Nombre de {line}s" if line and not line.endswith("s") else
+    name = readable(source_name(plan.get("cible"), plan.get("sql"))) or (f"Nombre de {line}s" if line and not line.endswith("s") else
                                            f"Nombre de {line}" if line else "Nombre de lignes")
     if plan.get("filtres"):
         name = f"{name} ({plan['filtres']})"

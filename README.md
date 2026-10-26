@@ -194,6 +194,8 @@ Sur ses fichiers de test, XK7-QUALITE était parfait. Sur une vraie base publiqu
 
 Après correction : 100/100 et 0 alerte sur les loyers (7 informations), toujours 21/21 sur les erreurs injectées et 0 fausse alerte sur le fichier propre. Sur Chinook, les « doublons » de morceaux passent de 34 à 4 (des titres identiques sur des albums différents ne sont plus signalés).
 
+Sur 96 339 ventes immobilières réelles (DVF), une règle métier proposée par GPT-4o (« le prix au m² doit être égal au prix divisé par la surface ») était violée par 88 % des lignes, et le score tombait à 10/100 : le prix au m² est arrondi dans le fichier, la règle comparait au centime près. Deux corrections : le modèle doit tolérer les arrondis (écart de plus de 1 %), et une règle violée par plus de la moitié des lignes est marquée « douteuse, à confirmer » sans compter dans le score, car c'est alors la règle qui décrit mal les données. Score corrigé : 98/100 ; toujours 21/21 et 0 fausse alerte sur les fichiers de test.
+
 Leçon : un contrôle réglé sur des données de test doit être éprouvé sur des données réelles avant d'être cru.
 
 ## XK7-RAG : la documentation

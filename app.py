@@ -141,7 +141,11 @@ def show_sql_result(msg, key):
     df = pd.DataFrame(msg["rows"], columns=msg["columns"])
     if df.shape == (1, 1):                       # une seule valeur ("combien de...") : affichée en gros
         value = df.iloc[0, 0]
-        st.metric(df.columns[0], f"{value:,}".replace(",", " ") if isinstance(value, (int, float)) else value)
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        shown = (f"{value:,}".replace(",", " ") if isinstance(value, int) else
+                 f"{value:,.2f}".replace(",", " ").replace(".", ",") if isinstance(value, float) else value)
+        st.metric(df.columns[0], shown)
     else:
         st.dataframe(df, hide_index=True, width="stretch")
     if msg.get("truncated"):
@@ -200,7 +204,7 @@ def show_chart(chart):
             points = {"filled": True, "color": XK7["rose"], "size": 45} if len(df) <= 36 else False
             c = alt.Chart(df).mark_line(color=XK7["orange"], strokeWidth=3, point=points).encode(
                 x=alt.X("label:T", title=series.index.name, axis=alt.Axis(format=date_format, labelAngle=0, labelOverlap="greedy", tickCount=8)),
-                y=alt.Y("value:Q", title=series.name),
+                y=alt.Y("value:Q", title=series.name, scale=alt.Scale(zero=False)),
                 tooltip=[alt.Tooltip("label:T", title=series.index.name, format=date_format),
                          alt.Tooltip("value:Q", title=series.name, format=",.2f")])
         else:

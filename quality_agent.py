@@ -29,6 +29,8 @@ sans aucune donnée, et la demande de l'utilisateur.
    sélectionnant d'abord les colonnes qui identifient la ligne. N'invente aucune valeur de données.
    Utilise exactement les noms de la structure, entre guillemets doubles s'ils contiennent des espaces
    ou des accents. Les dates sont des textes 'AAAA-MM-JJ HH:MM:SS'.
+   Pour comparer une valeur calculée à une autre (un total à la somme de ses lignes, un prix au m² au prix divisé
+   par la surface), tolère les arrondis : écart de plus de 1 % (ABS(a - b) > 0.01 * ABS(b)), jamais une égalité stricte.
    Ne propose pas de règle sur les valeurs manquantes, les doublons, les formats ou les liens entre tables :
    ils sont déjà contrôlés par ailleurs.
 
@@ -263,8 +265,8 @@ def check_outliers(t, df, pk):
             # Des dizaines de valeurs extrêmes : la queue naturelle de la distribution (ex. les loyers de Paris)
             if extreme.any() and extreme.sum() <= max(2, 0.02 * len(values)) and extreme.sum() >= 20:
                 found.append(issue("aberrant", t, col, INFO, f"{int(extreme.sum())} valeurs bien plus élevées que les "
-                                   "autres, trop nombreuses pour être des fautes de frappe : sans doute des cas réels "
-                                   f"(ex. les grandes villes). Habituellement entre {q1:g} et {q3:g}",
+                                   "autres, trop nombreuses pour être des fautes de frappe : sans doute des cas "
+                                   f"réels. Habituellement entre {q1:g} et {q3:g}",
                                    values.index[extreme], df))
             elif extreme.any() and extreme.sum() <= max(2, 0.02 * len(values)):
                 found.append(issue("aberrant", t, col, A_VERIFIER, f"{int(extreme.sum())} valeur(s) très éloignée(s) "
@@ -451,6 +453,16 @@ def check_quality(question="Vérifie la qualité des données.", db_path=DB_PATH
         focus, rules, rule_issues = check_rules(question, db_path, get_schema(db_path))
         for i in rule_issues:
             i["correction"] = propose_fix(i, tables.get(i["table"], pd.DataFrame()), pks.get(i["table"], []))
+            # Une règle violée par plus de la moitié des lignes décrit sans doute mal les données (arrondi,
+            # convention, unité) : c'est la règle qu'il faut revoir, pas toutes ces lignes
+            n_rows = len(tables.get(i["table"], ()))
+            if n_rows and i["nb"] > 0.5 * n_rows:
+                i["gravite"] = INFO
+                i["detail"] += (f" ({round(100 * i['nb'] / n_rows)} % des lignes : la règle décrit sans doute mal "
+                                "les données, par exemple un arrondi ou une convention. À confirmer avant de corriger)")
+                for r in rules:
+                    if r.get("sql") == i.get("sql"):
+                        r["statut"] = "douteuse"
         issues += rule_issues
 
     # Score par table : part des lignes sans erreur ni point à vérifier (les "info" ne comptent pas)
@@ -462,7 +474,8 @@ def check_quality(question="Vérifie la qualité des données.", db_path=DB_PATH
             if i["gravite"] != INFO:
                 flagged.update(i["lignes"])
         # Plusieurs règles peuvent viser les mêmes lignes : on compte la règle la plus touchée (estimation prudente)
-        rule_rows = max([i["nb"] for i in t_issues if i["type"] == "règle métier"], default=0)
+        rule_rows = max([i["nb"] for i in t_issues if i["type"] == "règle métier" and i["gravite"] != INFO],
+                        default=0)
         bad = min(len(df), len(flagged) + rule_rows)
         score = 100 if len(df) == 0 else round(100 * (1 - bad / len(df)))
         report[t] = {"lignes": len(df), "score": score, "cle": pks[t], "problemes": t_issues}
