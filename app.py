@@ -10,6 +10,7 @@ from sql_agent import ask, MAX_ROWS
 from core import run
 from quality_agent import check_quality, summary as quality_summary
 from analyse_agent import analyse as run_analysis
+from estimation import re_estimate, show_value
 from prevision_agent import (prevoir, run_plan as run_forecast_plan, fmt as pfmt, pct as ppct, label as plabel,
                              readable)
 from sql_schema import DB_PATH
@@ -169,6 +170,7 @@ def show_message(msg, key):
     show_quality(msg, key)
     show_analysis(msg, key)
     show_forecast(msg, key)
+    show_estimate(msg, key)
     show_sent(msg)
 
 
@@ -258,6 +260,15 @@ def forecast_message(result, db_label):
                  "echec": "Je n'ai pas réussi à préparer cette prévision. Précise la valeur à prévoir (prix, ventes, "
                           "commandes...) et, si besoin, la période (par mois, par trimestre)."}
         return {"badge": "XK7-PREVISION", "content": texts.get(result["type"], result["erreur"])}
+    if result["type"] == "caracteristiques":
+        keep = ("estimation", "bas", "haut", "fiche", "sources", "numeriques", "categories", "retirees", "modeles",
+                "gagnant", "importance", "synthese", "variables", "cible", "options", "_predict", "plan", "decoupage")
+        similar = result["semblables"]
+        content = (f"**{result['plan'].get('titre') or 'Estimation'}**\n\n*Base : {db_label} · {result['lignes']} "
+                   "lignes · modèles entraînés en local, synthèse écrite par le code*")
+        return {"badge": "XK7-PREVISION", "content": content,
+                "estimate": {**{k: result[k] for k in keep}, "semblables": similar.sample(min(len(similar), 5000),
+                                                                                         random_state=0)}}
     hist = None
     if result.get("distribution") is not None and len(result["distribution"]):
         d = result["distribution"]
@@ -270,6 +281,78 @@ def forecast_message(result, db_label):
                f"{len(result['donnees'])} lignes · modèles entraînés en local, synthèse écrite par le code*")
     return {"badge": "XK7-PREVISION", "content": content,
             "forecast": {**{k: result[k] for k in keep if k in result}, "histogramme": hist}}
+
+
+def show_estimate(msg, key):
+    """XK7-PREVISION, mode caractéristiques : estimation, simulateur, justification, synthèse."""
+    e = msg.get("estimate")
+    if not e:
+        return
+    # 1. L'estimation et les cas semblables
+    st.markdown("**1. L'estimation**")
+    sim_key = f"sim_{key}"
+    shown = st.session_state.get(sim_key) or (e["estimation"], e["bas"], e["haut"])
+    c1, c2, c3 = st.columns(3)
+    c1.metric(e["cible"], pfmt(shown[0]))
+    c2.metric("Au plus bas", pfmt(shown[1]))
+    c3.metric("Au plus haut", pfmt(shown[2]))
+    st.caption(f"8 chances sur 10 d'être entre les deux. Médiane des cas semblables : {pfmt(e['semblables'].median())}.")
+    similar = pd.DataFrame({"valeur": e["semblables"].clip(upper=e["semblables"].quantile(0.99))})
+    bars = alt.Chart(similar).mark_bar(color=XK7["rose"], opacity=0.85).encode(
+        x=alt.X("valeur:Q", bin=alt.Bin(maxbins=30), title=e["cible"]), y=alt.Y("count():Q", title="Cas semblables"))
+    band = alt.Chart(pd.DataFrame({"bas": [shown[1]], "haut": [shown[2]]})).mark_rect(
+        color=XK7["bleu"], opacity=0.18).encode(x="bas:Q", x2="haut:Q")
+    rule = alt.Chart(pd.DataFrame({"v": [shown[0]]})).mark_rule(color=XK7["bleu"], strokeWidth=3).encode(x="v:Q")
+    st.altair_chart(xk7_style((band + bars + rule).properties(height=200),
+                              "Cas semblables (rose) et estimation (bleu)"), width="stretch", theme=None)
+
+    # 2. Le simulateur : la fiche, modifiable, ré-estimée en local sans IA et sans réentraîner
+    st.markdown("**2. Le simulateur**")
+    st.caption("Les valeurs marquées « typique » ne venaient pas de la question : ce sont celles des cas semblables. "
+               "Change une valeur et clique sur Estimer : le modèle déjà entraîné recalcule instantanément.")
+    profile = {}
+    cols = st.columns(3)
+    for i, var in enumerate(e["variables"]):
+        label = var + ("" if e["sources"].get(var) == "question" else " (typique)")
+        value = e["fiche"].get(var)
+        with cols[i % 3]:
+            if var in e["categories"]:
+                options = list(e["options"].get(var, []))
+                if value is not None and value not in options:
+                    options = [value] + options
+                profile[var] = st.selectbox(label, options, index=options.index(value) if value in options else 0,
+                                            key=f"f_{key}_{var}")
+            else:
+                # Une valeur absente (le terrain d'un appartement) reste vide : 0 fausserait l'estimation
+                current = None if value is None or pd.isna(value) else float(value)
+                whole = current is None or current.is_integer()
+                profile[var] = st.number_input(label, value=current, step=1.0 if whole else 0.01,
+                                               format="%.0f" if whole else "%.2f", placeholder="vide",
+                                               key=f"f_{key}_{var}")
+    if st.button("Estimer", icon=":material/calculate:", key=f"est_{key}"):
+        st.session_state[sim_key] = re_estimate(e, profile)
+        st.rerun()
+
+    # 3. Pourquoi ce modèle
+    st.markdown("**3. Pourquoi ce modèle**")
+    m = e["modeles"].copy()
+    m.insert(0, "", ["🏆" if name == e["gagnant"] else "" for name in m["Modèle"]])
+    for col in ("MAE", "RMSE"):
+        m[col] = m[col].map(pfmt)
+    m["MAPE"] = m["MAPE"].map(ppct)
+    m["R²"] = m["R²"].map(lambda v: pfmt(v, 2))
+    st.dataframe(m, hide_index=True, width="stretch")
+    st.caption(f"Test : {e['decoupage']}. R² : part des écarts entre les cas que le modèle explique (1 = parfait).")
+    if e.get("importance") is not None:
+        imp = e["importance"].head(8).rename_axis("variable").reset_index(name="poids")
+        chart = alt.Chart(imp).mark_bar(color=XK7["bleu"], cornerRadiusEnd=4).encode(
+            y=alt.Y("variable:N", sort=None, title=None), x=alt.X("poids:Q", axis=alt.Axis(format="%"), title="Poids"),
+            tooltip=[alt.Tooltip("variable:N"), alt.Tooltip("poids:Q", format=".0%")]).properties(height=160)
+        st.altair_chart(xk7_style(chart, "Ce qui pèse le plus dans l'estimation"), width="stretch", theme=None)
+
+    # 4. La synthèse, écrite par le code
+    st.markdown("**4. En résumé**")
+    st.markdown("\n\n".join(e["synthese"]))
 
 
 def show_forecast(msg, key):
@@ -487,8 +570,9 @@ def easter_egg():
         if os.path.exists(song):
             st.audio(song, autoplay=True)
         st.markdown("**Tableau d'honneur**")
-        for col, (label, value) in zip(st.columns(4), [("Routage", "73/73"), ("SQL", "31/31"),
-                                                        ("Qualité", "21/21"), ("Analyse", "18/18")]):
+        for col, (label, value) in zip(st.columns(5), [("Routage", "73/73"), ("SQL", "31/31"),
+                                                        ("Qualité", "21/21"), ("Analyse", "18/18"),
+                                                        ("Prévision", "32/32")]):
             col.metric(label, value)
         st.caption("Données envoyées aux modèles pendant toutes ces évaluations : aucune.")
     st.balloons()

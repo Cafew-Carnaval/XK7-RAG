@@ -8,7 +8,7 @@ Un assistant data multi-agent, déployé en ligne. Chaque agent est spécialisé
 | XK7-SQL | Interroge une base de données en français : écrit la requête SQL, l'exécute en lecture seule et affiche le résultat, sans jamais montrer les données au modèle. Pour une modification, propose la requête sans l'exécuter | Terminé |
 | XK7-ANALYSE | Analyse une base (évolution, répartition, comparaison, classement, corrélation) et trace le graphique ; calculs et conclusion faits par le code, sans montrer les données au modèle | Terminé |
 | XK7-QUALITE | Contrôle la qualité des données (doublons, valeurs manquantes, formats, liens cassés, règles métier) et propose un script de correction, sans jamais l'exécuter | Terminé |
-| XK7-PREVISION | Prévoit l'évolution d'une valeur (prix, ventes, commandes) : 8 modèles, dont 4 de scikit-learn, mis en concurrence sur le passé, le meilleur prédit la suite avec une fourchette et une synthèse écrite par le code | En cours (mode « dans le temps » terminé) |
+| XK7-PREVISION | Prévoit l'évolution d'une valeur (8 modèles mis en concurrence sur le passé) ou estime une valeur à partir de caractéristiques (« combien vaut un T3 de 65 m² à Rezé ? », avec un simulateur), en local avec scikit-learn | Terminé |
 | XK7-CORE | Agent chef (LangGraph) qui envoie chaque question au bon agent, ou découpe une question mixte et enchaîne les deux | Terminé |
 
 ## Démo en ligne
@@ -104,6 +104,33 @@ Les modèles de ML prédisent la variation par rapport à la dernière valeur, p
 4. En résumé : la synthèse écrite par le code, avec un niveau de fiabilité.
 
 Les réglages (calcul, période, horizon) sont affichés tels que XK7 les a compris et modifiables : la prévision est relancée en local, sans repasser par l'IA.
+
+### L'estimation selon des caractéristiques
+
+"Combien vaut un T3 de 65 m² à Rezé ?" : GPT choisit la valeur à estimer et les variables utiles à partir de la structure, et relève les valeurs données dans la question ; tout le reste est local (`estimation.py`).
+
+- Les valeurs absentes de la question prennent celles des cas semblables (la latitude et la longitude des ventes à Rezé...), affichées « typique » et modifiables. Une valeur absente par nature (le terrain d'un appartement) reste vide : la remplacer par 0 faussait l'estimation de 14 000 €.
+- Fuite de données : une variable qui contient déjà la réponse est retirée. Le prix au m² multiplié par la surface redonne le prix : seul le prix au m² est retiré, la surface reste (une première version retirait les deux, et l'estimation ne dépendait plus de la surface).
+- Découpage dans le temps : entraînement jusqu'à mi-2025, test sur les 6 derniers mois.
+- Cinq modèles entraînés sur le logarithme du prix (ils raisonnent en pourcentage, comme la MAPE) : la médiane des biens semblables comme référence, une régression, une SVR, une forêt aléatoire et un gradient boosting.
+- Le modèle qui estime est exactement celui qui a été évalué ; les communes sont codées par un numéro pour les arbres. Temps total : de 214 s à une dizaine de secondes.
+- Le simulateur réutilise le modèle entraîné : changer la surface ou la commune donne une nouvelle estimation instantanément, sans IA.
+
+Sur 96 339 ventes de Loire-Atlantique, le gradient boosting gagne : R² = 0,75, 22 % d'erreur, 43 % de moins que la médiane des biens semblables. Ce qui pèse le plus : la surface (48 %), la commune (28 %), le type de bien (9 %).
+
+### Évaluation
+
+`evaluate_prevision.py`, 32 tests :
+
+| Mesure | Résultat |
+|---|---|
+| Backtest sans triche : changer les valeurs futures ne change aucune prédiction passée (8 modèles) | 8/8 |
+| Reproductibilité, fourchettes, garde-fous (historique trop court, trop peu de lignes, faute de frappe) | 12/12 |
+| Cohérence du simulateur (40 m² < 65 m² < 100 m²) et fuite de données | réussis |
+| Avec GPT : bon mode (temps, caractéristiques, impossible), valeurs de la question comprises | 6/6 |
+| Données envoyées au modèle | aucune (6/6) |
+
+Les premiers passages avec GPT ont échoué de trois façons différentes : la cible annoncée sous son nom d'origine au lieu de son alias, une faute de frappe dans un alias, une valeur « T2 » inventée pour le type de bien. Plutôt qu'ajouter une consigne à chaque fois, le code réconcilie les noms (exacts, sans accents ni espaces, ou via les AS de la requête), répare les alias abîmés et explique une valeur invalide au lieu de refuser. Le test a aussi révélé que le prompt contenait de vraies villes comme exemples : ils ont été remplacés par des valeurs neutres.
 
 ### Ce que les premiers tests ont appris
 
@@ -376,6 +403,8 @@ python evaluate_quality.py # évaluation de XK7-QUALITE (crée les fichiers de t
 python evaluate_analyse.py # évaluation de XK7-ANALYSE
 python analyse_agent.py    # quatre analyses de démonstration dans le terminal
 python prevision_agent.py data/ventes_immobilier_44.xlsx   # prévision du prix au m² dans le terminal
+python estimation.py data/ventes_immobilier_44.xlsx         # estimation d'un T3 à Rezé et simulateur dans le terminal
+python evaluate_prevision.py   # évaluation de XK7-PREVISION (--local : sans appel à l'API)
 python prepare_dvf.py data/ventes_immobilier_44.xlsx 2021.csv.gz 2022.csv.gz ...   # extrait DVF à partir des fichiers bruts
 python quality_agent.py data/qualite_sale.xlsx   # rapport de qualité dans le terminal
 python core.py             # trois questions de démonstration dans le terminal

@@ -8,6 +8,7 @@ Aucune donnée n'est envoyée au modèle de langage.
 """
 import json
 import re
+import unicodedata
 import sqlite3
 import warnings
 import numpy as np
@@ -22,11 +23,13 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 from sql_schema import get_schema, DB_PATH
 from sql_agent import run_sql, UnsafeQuery
+from estimation import run_estimation
 
 load_dotenv()
 warnings.filterwarnings("ignore", category=UserWarning)
 
 plan_llm = ChatOpenAI(model="gpt-4o", temperature=0, model_kwargs={"response_format": {"type": "json_object"}})
+LOCAL_ERRORS = []       # détail des erreurs inattendues, gardé en local (jamais envoyé au modèle)
 PLAN_LOG = []            # tout ce qui est envoyé au modèle, pour vérifier la confidentialité
 MAX_ROWS = 200_000
 MAX_SECONDS = 10
@@ -411,7 +414,7 @@ SQLite qui EXTRAIT les données nécessaires. Tu ne vois que la structure de la 
 Deux modes :
 - "temps" : prévoir l'évolution d'une valeur dans le temps ("comment va évoluer le prix", "prévois les ventes des
   6 prochains mois", "combien de commandes le mois prochain ?").
-- "caracteristiques" : estimer une valeur à partir de caractéristiques ("combien vaut un T3 de 65 m² à Rezé ?",
+- "caracteristiques" : estimer une valeur à partir de caractéristiques ("combien vaut un T3 de 65 m² dans telle ville ?",
   "quel prix pour une maison de 120 m² avec jardin ?").
 Si la question ne demande pas une prévision ou une estimation, ou si aucune colonne de la structure ne correspond
 à ce qu'elle demande, mode = "impossible". Mais tu ne connais pas les VALEURS des données : ne réponds jamais
@@ -430,6 +433,19 @@ Pour le mode "temps" :
 - Donne un nom lisible en français à chaque colonne avec AS, d'après ce qu'elle mesure (ex. AS "Prix au m²",
   AS "Date de vente"), jamais AS "Cible", AS "Valeur" ou AS "Date" ; date et cible sont ces noms lisibles.
 
+Pour le mode "caracteristiques" :
+- cible : la colonne à estimer (ex. le prix) ; date : une colonne de date s'il y en a une (sinon null), elle sert
+  seulement à tester les modèles sur les cas les plus récents.
+- variables : les colonnes qui décrivent un cas et peuvent influencer la cible (type, surface, pièces, commune,
+  terrain, coordonnées...). Jamais une colonne calculée à partir de la cible (le prix au m² pour estimer un prix :
+  il contient déjà la réponse), jamais un identifiant (numéro, code unique).
+- valeurs : seulement les valeurs données dans la question, pour les variables concernées, avec les noms lisibles
+  (ex. {{"Type de bien": "Appartement", "Surface": 65, "Pièces": 3, "Commune": "<la ville de la question>"}}). "T3" veut dire 3 pièces : il se traduit par Pièces = 3 (et un appartement), jamais par une valeur "T3"
+  dans une autre colonne. Une valeur de catégorie doit être un mot plausible de cette colonne.
+  N'invente aucune valeur que la question ne donne pas.
+- La requête renvoie toutes les lignes de détail utiles (sans filtre sur les valeurs de la question : le modèle
+  apprend sur tous les cas), avec la cible, les variables et la date, SANS GROUP BY ni LIMIT.
+
 Règles SQL : une seule requête SELECT (ou WITH ... SELECT) ; noms exacts de la structure, entre guillemets doubles
 s'ils contiennent des espaces, des accents ou une apostrophe ; jointures par les liens "->" ou les colonnes de même
 nom ; pour filtrer sur un texte dont tu ne connais pas l'orthographe exacte, utilise LIKE.
@@ -442,8 +458,9 @@ Question : {question}
 Réponds uniquement avec un JSON :
 {{"mode": "temps" | "caracteristiques" | "impossible", "sql": "SELECT ...", "date": "...", "cible": "..." ou null,
  "agregation": "mediane|moyenne|somme|nombre", "periode": "mois|trimestre", "horizon": 6,
- "titre": "titre court", "filtres": "les filtres en quelques mots (ex. appartements, Nantes) ou vide",
+ "titre": "titre court", "filtres": "les filtres en quelques mots (ex. appartements, une ville) ou vide",
  "ligne": "ce que représente une ligne de la requête, au singulier (ex. vente, commande, facture)",
+ "variables": ["..."] (mode caracteristiques), "valeurs": {{"...": "..."}} (mode caracteristiques),
  "raison": "seulement si impossible"}}"""
 
 RETRY_TEXT = """
@@ -483,14 +500,56 @@ def normalize_plan(plan):
     return plan
 
 
+def squash(name):
+    """Nom réduit à ses lettres et chiffres, sans accents ni casse : « Typede bien » = « Type de bien »."""
+    text = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]", "", text)
+
+
+def resolve(name, columns, sql):
+    """Retrouve la colonne du résultat que le modèle a voulu désigner :
+    1. le nom exact ; 2. le même nom sans accents, espaces ni ponctuation ; 3. la colonne d'origine renommée par un
+    AS dans la requête (« Prix (€) » -> « Prix » pour "Prix (€)" AS "Prix"). Sinon, le nom tel quel."""
+    if not name or name in columns:
+        return name
+    by_squash = {squash(c): c for c in columns}
+    if squash(name) in by_squash:
+        return by_squash[squash(name)]
+    for source, alias in re.findall(r'(?:\w+\.)?("[^"]+"|\w+)\s+AS\s+("[^"]+"|\w+)', sql or "", re.IGNORECASE):
+        if squash(source.strip('"')) == squash(name) and squash(alias.strip('"')) in by_squash:
+            return by_squash[squash(alias.strip('"'))]
+    return name
+
+
+def align_plan(plan, columns):
+    """Aligne les noms du plan (cible, date, variables, clés des valeurs) sur les colonnes vraiment obtenues."""
+    sql = plan.get("sql")
+    for key in ("date", "cible"):
+        if plan.get(key):
+            plan[key] = resolve(plan[key], columns, sql)
+    if plan.get("variables"):
+        plan["variables"] = list(dict.fromkeys(resolve(v, columns, sql) for v in plan["variables"]))
+    if isinstance(plan.get("valeurs"), dict):
+        plan["valeurs"] = {resolve(k, columns, sql): v for k, v in plan["valeurs"].items()}
+    return plan
+
+
 def extract(plan, db_path):
     columns, rows, truncated = run_sql(plan["sql"], db_path, max_rows=MAX_ROWS, max_seconds=MAX_SECONDS)
     df = pd.DataFrame(rows, columns=columns)
+    # Un alias qui n'est qu'une variante abîmée du nom d'origine ("Type de bien" AS "Typede bien") reprend ce nom
+    renames = {}
+    for source, alias in re.findall(r'(?:\w+\.)?("[^"]+"|\w+)\s+AS\s+("[^"]+"|\w+)', plan["sql"], re.IGNORECASE):
+        source, alias = source.strip('"'), alias.strip('"')
+        if alias in df.columns and alias != source and squash(alias) == squash(source) and source not in df.columns:
+            renames[alias] = source
+    df = df.rename(columns=renames)
+    align_plan(plan, list(df.columns))
     for key in ("date", "cible"):
         col = plan.get(key)
         if col and col not in df.columns:
             raise PlanError(f"La colonne « {col} » n'est pas dans le résultat de la requête "
-                            f"(colonnes obtenues : {', '.join(columns)}).")
+                            f"(colonnes obtenues : {', '.join(df.columns)}).")
     if df.empty:
         raise PlanError("La requête ne renvoie aucune ligne (filtre trop strict ?).")
     return df, truncated
@@ -543,9 +602,19 @@ def prevoir(question, db_path=DB_PATH):
                 return {"type": "impossible", "erreur": plan.get("raison") or "Ce n'est pas une demande de prévision.",
                         "plan": plan, "essais": attempt + 1}
             if mode == "caracteristiques":
-                return {"type": "bientot", "erreur": "L'estimation selon des caractéristiques arrive bientôt : pour "
-                        "l'instant, XK7-PREVISION prévoit l'évolution d'une valeur dans le temps.",
-                        "plan": plan, "essais": attempt + 1}
+                if not plan.get("sql") or not plan.get("cible") or not plan.get("variables"):
+                    raise PlanError("Le plan doit contenir une requête (sql), une cible et des variables.")
+                plan.setdefault("date", None)
+                df, truncated = extract(plan, db_path)
+                missing = [v for v in plan["variables"] if v not in df.columns]
+                if missing:
+                    raise PlanError(f"Variables absentes du résultat de la requête : {', '.join(missing)} "
+                                    f"(colonnes obtenues : {', '.join(df.columns)}).")
+                result = run_estimation(df, plan["cible"], plan["variables"], plan.get("valeurs") or {},
+                                        plan.get("date"), readable(source_name(plan["cible"], plan["sql"])))
+                if "erreur" in result:
+                    return {"type": "impossible", "erreur": result["erreur"], "plan": plan, "essais": attempt + 1}
+                return {"type": "caracteristiques", "plan": plan, "essais": attempt + 1, **result}
             plan = normalize_plan(plan)
             df, truncated = extract(plan, db_path)
             result = run_plan(plan, df)
@@ -556,8 +625,11 @@ def prevoir(question, db_path=DB_PATH):
             return {"type": "refus", "erreur": str(e), "plan": plan, "essais": attempt + 1}
         except (PlanError, sqlite3.Error) as e:
             error = str(e)
-        except (KeyError, ValueError, TypeError) as e:
-            error = f"Plan inutilisable ({type(e).__name__}). Vérifie le mode, la date, la cible et l'agrégation."
+        except (KeyError, ValueError, TypeError, IndexError) as e:
+            # Message générique pour le modèle (aucune valeur de données) ; le détail reste en local
+            LOCAL_ERRORS.append(f"{type(e).__name__}: {e}")
+            error = (f"Plan inutilisable ({type(e).__name__}). Vérifie le mode, la cible, les variables (noms "
+                     "exacts des colonnes de ta requête) et les valeurs.")
     return {"type": "echec", "erreur": error, "plan": plan, "essais": MAX_ATTEMPTS}
 
 
