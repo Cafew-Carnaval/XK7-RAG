@@ -296,7 +296,11 @@ def show_estimate(msg, key):
     c1.metric(e["cible"], pfmt(shown[0]))
     c2.metric("Au plus bas", pfmt(shown[1]))
     c3.metric("Au plus haut", pfmt(shown[2]))
-    st.caption(f"8 chances sur 10 d'être entre les deux. Médiane des cas semblables : {pfmt(e['semblables'].median())}.")
+    if st.session_state.get(sim_key):
+        st.caption(f":material/tune: Estimation recalculée pour la fiche modifiée dans le simulateur. Le graphique, les cas "
+                   f"semblables et le résumé ci-dessous décrivent la question d'origine ({pfmt(e['estimation'])}).")
+    else:
+        st.caption(f"8 chances sur 10 d'être entre les deux. Médiane des cas semblables : {pfmt(e['semblables'].median())}.")
     similar = pd.DataFrame({"valeur": e["semblables"].clip(upper=e["semblables"].quantile(0.99))})
     bars = alt.Chart(similar).mark_bar(color=XK7["rose"], opacity=0.85).encode(
         x=alt.X("valeur:Q", bin=alt.Bin(maxbins=30), title=e["cible"]), y=alt.Y("count():Q", title="Cas semblables"))
@@ -329,8 +333,14 @@ def show_estimate(msg, key):
                 profile[var] = st.number_input(label, value=current, step=1.0 if whole else 0.01,
                                                format="%.0f" if whole else "%.2f", placeholder="vide",
                                                key=f"f_{key}_{var}")
-    if st.button("Estimer", icon=":material/calculate:", key=f"est_{key}"):
+    b1, b2 = st.columns(2)
+    if b1.button("Estimer", icon=":material/calculate:", key=f"est_{key}"):
         st.session_state[sim_key] = re_estimate(e, profile)
+        st.rerun()
+    if st.session_state.get(sim_key) and b2.button("Revenir à la question", icon=":material/undo:", key=f"undo_{key}"):
+        st.session_state.pop(sim_key)
+        for var in e["variables"]:
+            st.session_state.pop(f"f_{key}_{var}", None)
         st.rerun()
 
     # 3. Pourquoi ce modèle
@@ -351,7 +361,7 @@ def show_estimate(msg, key):
         st.altair_chart(xk7_style(chart, "Ce qui pèse le plus dans l'estimation"), width="stretch", theme=None)
 
     # 4. La synthèse, écrite par le code
-    st.markdown("**4. En résumé**")
+    st.markdown("**4. En résumé**" + (" *(question d'origine)*" if st.session_state.get(sim_key) else ""))
     st.markdown("\n\n".join(e["synthese"]))
 
 

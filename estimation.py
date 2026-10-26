@@ -208,7 +208,9 @@ def build_profile(df, numeric, categorical, given):
                 profile[v], sources[v] = float(str(given[v]).replace(",", ".")), "question"
                 continue
             except ValueError:
-                problems.append(f"« {given[v]} » n'est pas un nombre pour « {v} ».")
+                # Ex. « avec jardin » traduit en ">0" pour le terrain : on garde la valeur typique et on le dit
+                notes.append(f"« {given[v]} » n'est pas un nombre pour « {v} » : la valeur typique des cas semblables "
+                             "est utilisée, modifie-la dans le simulateur si besoin.")
         values = pd.to_numeric(similar[v], errors="coerce").dropna()
         profile[v], sources[v] = (float(values.median()) if len(values) else np.nan), "typique"
     for c in categorical:

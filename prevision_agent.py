@@ -22,7 +22,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
 from sql_schema import get_schema, DB_PATH
-from sql_agent import run_sql, UnsafeQuery
+from sql_agent import run_sql, UnsafeQuery, top_level_keyword
 from estimation import run_estimation
 
 load_dotenv()
@@ -605,6 +605,12 @@ def prevoir(question, db_path=DB_PATH):
                 if not plan.get("sql") or not plan.get("cible") or not plan.get("variables"):
                     raise PlanError("Le plan doit contenir une requête (sql), une cible et des variables.")
                 plan.setdefault("date", None)
+                # Pas de filtre en estimation : le modèle apprend sur tous les cas (filtré sur les appartements,
+                # il ne pourrait jamais estimer une maison dans le simulateur)
+                where = top_level_keyword(plan["sql"], "WHERE")
+                if where != -1:   # on garde ce qui suit le WHERE (GROUP BY, ORDER BY, LIMIT)
+                    ends = [i for k in ("GROUP", "ORDER", "LIMIT") if (i := top_level_keyword(plan["sql"], k, where)) != -1]
+                    plan["sql"] = plan["sql"][:where].rstrip() + (" " + plan["sql"][min(ends):] if ends else "")
                 df, truncated = extract(plan, db_path)
                 missing = [v for v in plan["variables"] if v not in df.columns]
                 if missing:
@@ -616,6 +622,9 @@ def prevoir(question, db_path=DB_PATH):
                     return {"type": "impossible", "erreur": result["erreur"], "plan": plan, "essais": attempt + 1}
                 return {"type": "caracteristiques", "plan": plan, "essais": attempt + 1, **result}
             plan = normalize_plan(plan)
+            # Le mot « trimestre » dans la question de l'utilisateur fixe la période (lu par le code, pas deviné)
+            if "trimestr" in squash(question) and plan["periode"] != "trimestre":
+                plan["periode"], plan["horizon"] = "trimestre", min(plan["horizon"], 4)
             df, truncated = extract(plan, db_path)
             result = run_plan(plan, df)
             if truncated:
