@@ -8,6 +8,7 @@ Un assistant data multi-agent, déployé en ligne. Chaque agent est spécialisé
 | XK7-SQL | Interroge une base de données en français : écrit la requête SQL, l'exécute en lecture seule et affiche le résultat, sans jamais montrer les données au modèle. Pour une modification, propose la requête sans l'exécuter | Terminé |
 | XK7-ANALYSE | Analyse une base (évolution, répartition, comparaison, classement, corrélation) et trace le graphique ; calculs et conclusion faits par le code, sans montrer les données au modèle | Terminé |
 | XK7-QUALITE | Contrôle la qualité des données (doublons, valeurs manquantes, formats, liens cassés, règles métier) et propose un script de correction, sans jamais l'exécuter | Terminé |
+| XK7-PREVISION | Prévoit l'évolution d'une valeur (prix, ventes, commandes) : 8 modèles, dont 4 de scikit-learn, mis en concurrence sur le passé, le meilleur prédit la suite avec une fourchette et une synthèse écrite par le code | En cours (mode « dans le temps » terminé) |
 | XK7-CORE | Agent chef (LangGraph) qui envoie chaque question au bon agent, ou découpe une question mixte et enchaîne les deux | Terminé |
 
 ## Démo en ligne
@@ -37,6 +38,7 @@ flowchart LR
     S --> RAG2[XK7-RAG] --> SQL2[XK7-SQL]
     R -->|contrôle| QUAL[XK7-QUALITE]
     R -->|analyse| AN[XK7-ANALYSE]
+    R -->|prévision| PR[XK7-PREVISION]
     R -->|hors sujet| H[Refus]
 ```
 
@@ -58,6 +60,7 @@ flowchart LR
 | Après ajout de XK7-ANALYSE (57 questions, premier essai) | 54/57 : 2 questions sur les données envoyées à l'analyse, 1 régression |
 | Après correction du prompt (61 questions) | 61/61 (16 cours, 18 données, 10 qualité, 9 analyse, 4 mixtes, 4 hors sujet) |
 | Avec les questions « doit répondre » (64 questions) | 64/64 |
+| Après ajout de XK7-PREVISION (73 questions, 7 catégories) | 73/73 (après une correction : « vérifie-le sur... » après une question de cours envoyait au contrôle qualité) |
 | Dont questions écrites après les corrections | 10/10 |
 | Temps moyen par décision | environ 1 s |
 
@@ -74,6 +77,39 @@ Après chaque correction, de nouvelles questions sont écrites, pour vérifier q
 6. Ajout de XK7-ANALYSE : "Donne la durée moyenne des morceaux par genre" et "Quel genre se vend le mieux en France ?" partaient à l'analyse (le "par genre" suffisait à évoquer une répartition), et "l'isolation faible" retombait en hors sujet : le prompt plus long faisait oublier une règle au petit modèle. Correction : l'analyse exige un mot explicite (évolution, répartition, part, compare, lien, graphique...), et les notions internes des SGBD sont toujours du cours. Ajouter un agent modifie le comportement des autres : on relance toute l'évaluation, pas seulement les nouvelles questions.
 
 Leçon commune : chaque appel à un modèle est un point où le système peut dérailler, même pour une tâche simple comme découper une phrase. Les réponses des modèles sont donc toujours vérifiées par le code.
+
+## XK7-PREVISION : prévoir à partir du passé
+
+« Tu viens avec ton Excel, tu repars avec une prévision justifiée, sans que tes données quittent l'outil. »
+
+XK7-PREVISION répond aux questions tournées vers l'avenir ("Comment va évoluer le prix au m² des appartements à Nantes ?", "Combien de ventes le mois prochain ?"). Le routeur le distingue de XK7-ANALYSE par le temps du verbe : "comment évolue" décrit le passé, "comment va évoluer" demande une prévision.
+
+### Le partage des rôles
+
+| Étape | Fait par | Détail |
+|---|---|---|
+| Comprendre la question | GPT-4o, à partir de la structure seule | Date, valeur à prévoir, calcul (médiane pour un prix, somme pour un total, nombre pour « combien de »), période, horizon, SELECT d'extraction |
+| Vérifier l'historique | le code | Moins de 12 mois (8 trimestres) : pas de prévision, et XK7 le dit ; moins de 2 ans : tendance seulement ; au-delà : tendance et saisonnalité |
+| Mettre les modèles en concurrence | scikit-learn, en local | Naïf, moyenne mobile, naïf saisonnier, naïf désaisonnalisé, régression linéaire, SVR, forêt aléatoire, gradient boosting |
+| Juger | le code | Backtest : on rejoue les 12 dernières périodes sans jamais montrer le futur au modèle ; MAPE, MAE, RMSE et gain sur le naïf |
+| Prévoir et conclure | le code | Le gagnant prévoit la suite, la fourchette vient de ses erreurs passées, la synthèse est écrite à partir des chiffres |
+
+Les modèles de ML prédisent la variation par rapport à la dernière valeur, pas la valeur elle-même : un arbre de décision ne sait pas prédire plus haut que ce qu'il a vu, une variation si. Si aucun modèle ne bat nettement le naïf, XK7 garde le naïf et explique pourquoi.
+
+### L'interface
+
+1. Ce qui s'est passé : chiffres clés et répartition des valeurs.
+2. La prévision : l'historique en rose, la prévision en bleu pointillé et sa zone d'incertitude.
+3. Pourquoi ce modèle : le classement des modèles et leurs scores sur le passé.
+4. En résumé : la synthèse écrite par le code, avec un niveau de fiabilité.
+
+Les réglages (calcul, période, horizon) sont affichés tels que XK7 les a compris et modifiables : la prévision est relancée en local, sans repasser par l'IA.
+
+### Ce que les premiers tests ont appris
+
+Sur 96 339 vraies ventes immobilières de Loire-Atlantique (DVF 2021-2025, `prepare_dvf.py`), le nombre de ventes par trimestre montrait une saisonnalité nette (+13 % au 3e trimestre) que la prévision ignorait : avec 20 trimestres, les modèles de ML n'avaient pas assez d'exemples pour l'apprendre. Les références classiques de la prévision ont été ajoutées (naïf saisonnier, naïf désaisonnalisé). Par mois, le naïf désaisonnalisé gagne avec 57 % d'erreur en moins que le naïf ; par trimestre, le naïf reste meilleur et la synthèse explique pourquoi. Avec peu de données, une méthode simple et bien choisie bat souvent le ML.
+
+Le R² a été remplacé par le gain sur le naïf : sur quelques périodes presque plates, il était négatif pour tous les modèles, donc trompeur.
 
 ## XK7-ANALYSE : l'analyse avec graphique
 
@@ -337,6 +373,8 @@ python evaluate_router.py  # évaluation du routage de XK7-CORE
 python evaluate_quality.py # évaluation de XK7-QUALITE (crée les fichiers de test si besoin)
 python evaluate_analyse.py # évaluation de XK7-ANALYSE
 python analyse_agent.py    # quatre analyses de démonstration dans le terminal
+python prevision_agent.py data/ventes_immobilier_44.xlsx   # prévision du prix au m² dans le terminal
+python prepare_dvf.py data/ventes_immobilier_44.xlsx 2021.csv.gz 2022.csv.gz ...   # extrait DVF à partir des fichiers bruts
 python quality_agent.py data/qualite_sale.xlsx   # rapport de qualité dans le terminal
 python core.py             # trois questions de démonstration dans le terminal
 python sql_agent.py        # tests de sécurité et quelques questions dans le terminal

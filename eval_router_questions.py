@@ -101,4 +101,18 @@ QUESTIONS = [
      "question": "Quel code SQL pour supprimer les ventes inférieures à 30 en août ?", "agent": "sql"},
     {"type": "doit répondre", "question": "Écris-moi la requête pour passer tous les prix du jazz à 0,79.", "agent": "sql"},
     {"type": "doit répondre", "question": "Comment écrire un DELETE avec une sous-requête ?", "agent": "rag"},
+    # Prévisions (26/10) : le futur va à XK7-PREVISION, le passé reste à XK7-ANALYSE
+    {"type": "prevision", "question": "Prévois le chiffre d'affaires des 6 prochains mois.", "agent": "prevision"},
+    {"type": "prevision", "question": "Comment va évoluer le nombre de factures ?", "agent": "prevision"},
+    {"type": "prevision", "question": "Combien de factures le trimestre prochain ?", "agent": "prevision"},
+    {"type": "prevision", "source": "le fichier déposé par l'utilisateur (ventes_immobilier_44.xlsx)",
+     "question": "Comment va évoluer le prix au m² des appartements à Nantes ?", "agent": "prevision"},
+    {"type": "prevision", "source": "le fichier déposé par l'utilisateur (ventes_immobilier_44.xlsx)",
+     "question": "Combien vaut un T3 de 65 m² à Rezé ?", "agent": "prevision"},
+    {"type": "prevision", "question": "Comment a évolué le chiffre d'affaires depuis 2010 ?", "agent": "analyse"},
+    {"type": "prevision", "question": "Combien de factures en 2012 ?", "agent": "sql"},
+    {"type": "prevision", "question": "C'est quoi une série temporelle ?", "agent": "rag"},
+    # Écrite après la règle « vérifie-le » du 26/10, pour vérifier qu'elle est générale
+    {"type": "nouveau", "question": "Quelle différence entre COUNT(*) et COUNT(colonne) ? Vérifie-la sur la table des clients.",
+     "agent": "les_deux"},
 ]

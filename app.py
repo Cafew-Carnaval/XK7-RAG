@@ -1,5 +1,6 @@
 import os
 import contextvars
+import numpy as np
 import pandas as pd
 import altair as alt
 import streamlit as st
@@ -9,9 +10,11 @@ from sql_agent import ask, MAX_ROWS
 from core import run
 from quality_agent import check_quality, summary as quality_summary
 from analyse_agent import analyse as run_analysis
+from prevision_agent import (prevoir, run_plan as run_forecast_plan, fmt as pfmt, pct as ppct, label as plabel,
+                             readable)
 from sql_schema import DB_PATH
 from data_upload import to_sqlite, delete_file, UploadError, MAX_SIZE_MB
-import router, core, sql_agent, quality_agent, analyse_agent
+import router, core, sql_agent, quality_agent, analyse_agent, prevision_agent
 
 load_dotenv()
 
@@ -26,6 +29,7 @@ AGENTS = {
     "sql": "Données",
     "qualite": "Qualité",
     "analyse": "Analyse",
+    "prevision": "Prévision",
 }
 # Exemples cliquables sur l'écran d'accueil
 EXAMPLES = {
@@ -39,6 +43,8 @@ EXAMPLES = {
                 "Les données des factures sont-elles fiables ?"],
     "analyse": ["Comment évolue le chiffre d'affaires par année ?", "Quelle est la répartition des morceaux par genre ?",
                 "Y a-t-il un lien entre la durée d'un morceau et sa taille ?"],
+    "prevision": ["Prévois le chiffre d'affaires des 6 prochains mois.", "Combien de factures le trimestre prochain ?",
+                  "Comment va évoluer le panier moyen ?"],
 }
 WELCOME = {
     "core": "Pose une question de cours ou sur les données : le bon agent répond.",
@@ -46,17 +52,19 @@ WELCOME = {
     "sql": "Pose une question sur les données : la requête SQL est écrite et exécutée pour toi.",
     "qualite": "Demande un contrôle : doublons, valeurs manquantes, formats, liens cassés, règles métier.",
     "analyse": "Demande une analyse avec graphique : évolution, répartition, comparaison, lien entre deux valeurs.",
+    "prevision": "Demande une prévision : 6 modèles sont mis en concurrence sur le passé, le meilleur prédit la suite.",
 }
-ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "qualite": "XK7-QUALITE", "analyse": "XK7-ANALYSE", "les_deux": "XK7-RAG puis XK7-SQL",
+ROUTE_LABELS = {"rag": "XK7-RAG", "sql": "XK7-SQL", "qualite": "XK7-QUALITE", "analyse": "XK7-ANALYSE", "prevision": "XK7-PREVISION", "les_deux": "XK7-RAG puis XK7-SQL",
                 "hors_sujet": "aucun agent"}
 # Couleurs du thème XK7 (voir .streamlit/config.toml), reprises dans les graphiques
-XK7 = {"orange": "#FF8A3D", "rose": "#F5A3C7", "texte": "#F4EEF2", "grille": "#3A2533"}
+XK7 = {"orange": "#FF8A3D", "rose": "#F5A3C7", "texte": "#F4EEF2", "grille": "#3A2533", "bleu": "#5CC8FF"}
 # Cartes de l'écran d'accueil en mode automatique : icône, nom, rôle, exemple
 CARDS = [
     (":material/menu_book:", "Documentation", "Cours et documentation SQL", "C'est quoi une jointure externe ?"),
     (":material/table_view:", "Données", "Questions en français sur la base", "Quels sont les 5 clients qui ont le plus dépensé ?"),
     (":material/fact_check:", "Qualité", "Doublons, trous, incohérences", "Vérifie la qualité des données."),
     (":material/monitoring:", "Analyse", "Évolutions, répartitions, liens", "Comment évolue le chiffre d'affaires par année ?"),
+    (":material/trending_up:", "Prévision", "Le futur, d'après le passé", "Prévois le chiffre d'affaires des 6 prochains mois."),
 ]
 GRAVITY_ICONS = {"erreur": ":material/error:", "à vérifier": ":material/warning:", "info": ":material/info:"}
 
@@ -81,7 +89,7 @@ class SessionLog(list):
 
 for module, name, label in [(router, "ROUTER_LOG", "XK7-CORE · routage"), (core, "SPLIT_LOG", "XK7-CORE · découpage"),
                             (sql_agent, "PROMPT_LOG", "XK7-SQL"), (quality_agent, "RULES_LOG", "XK7-QUALITE"),
-                            (analyse_agent, "PLAN_LOG", "XK7-ANALYSE")]:
+                            (analyse_agent, "PLAN_LOG", "XK7-ANALYSE"), (prevision_agent, "PLAN_LOG", "XK7-PREVISION")]:
     if not isinstance(getattr(module, name), SessionLog):
         setattr(module, name, SessionLog(label))
 
@@ -156,6 +164,7 @@ def show_message(msg, key):
     show_sql_result(msg, key)
     show_quality(msg, key)
     show_analysis(msg, key)
+    show_forecast(msg, key)
     show_sent(msg)
 
 
@@ -225,6 +234,149 @@ def show_analysis(msg, key):
     with st.expander("Requête d'extraction"):
         st.caption(result.get("explication", ""))
         st.code(result["sql"], language="sql")
+
+
+def xk7_style(chart, title=""):
+    """Couleurs et polices du thème XK7 pour un graphique Altair."""
+    return (chart.properties(title=title)
+            .configure(background="transparent", font="sans-serif")
+            .configure_axis(labelColor=XK7["rose"], titleColor=XK7["rose"], gridColor=XK7["grille"],
+                            domainColor=XK7["grille"], tickColor=XK7["grille"], labelFontSize=12, titleFontSize=12)
+            .configure_title(color=XK7["texte"], fontSize=15, anchor="start")
+            .configure_legend(labelColor=XK7["texte"], titleColor=XK7["rose"])
+            .configure_view(strokeWidth=0))
+
+
+def forecast_message(result, db_label):
+    """Transforme un résultat de XK7-PREVISION en message à afficher (synthèse écrite par le code, sans IA)."""
+    if result["type"] in ("impossible", "bientot", "echec", "refus"):
+        texts = {"refus": "Je ne peux pas faire ça : XK7-PREVISION est en lecture seule.",
+                 "echec": "Je n'ai pas réussi à préparer cette prévision. Précise la valeur à prévoir (prix, ventes, "
+                          "commandes...) et, si besoin, la période (par mois, par trimestre)."}
+        return {"badge": "XK7-PREVISION", "content": texts.get(result["type"], result["erreur"])}
+    hist = None
+    if result.get("distribution") is not None and len(result["distribution"]):
+        d = result["distribution"]
+        d = d[d <= d.quantile(0.99)]              # le 1 % le plus haut écraserait l'échelle : on ne le dessine pas
+        counts, edges = np.histogram(d, bins=30)
+        hist = pd.DataFrame({"de": edges[:-1], "a": edges[1:], "n": counts})
+    keep = ("serie", "niveau", "periode", "cible", "contexte", "synthese", "modeles", "gagnant", "utilise",
+            "bat_le_naif", "critere", "backtest", "prevision", "plan", "donnees")
+    content = (f"**{result['plan'].get('titre') or result['cible']}**\n\n*Base : {db_label} · "
+               f"{len(result['donnees'])} lignes · modèles entraînés en local, synthèse écrite par le code*")
+    return {"badge": "XK7-PREVISION", "content": content,
+            "forecast": {**{k: result[k] for k in keep if k in result}, "histogramme": hist}}
+
+
+def show_forecast(msg, key):
+    """XK7-PREVISION en 4 blocs : contexte, prévision, justification (les modèles), synthèse ; réglages modifiables."""
+    f = msg.get("forecast")
+    if not f:
+        return
+    series, periode = f["serie"], f["periode"]
+    history = pd.DataFrame({"date": series.index.to_timestamp(), "valeur": series.values})
+    date_format = "%m/%Y" if periode == "mois" else "%Y"
+    # Par trimestre : une seule étiquette par an (le 1er janvier), sinon chaque année s'affiche quatre fois
+    years = range(history["date"].dt.year.min(), history["date"].dt.year.max() + 2)
+    axis = (alt.Axis(format=date_format, labelOverlap="greedy") if periode == "mois" else
+            alt.Axis(format="%Y", values=[alt.DateTime(year=y, month=1, date=1) for y in years]))
+
+    # 1. Le contexte : ce qui s'est passé avant
+    st.markdown("**1. Ce qui s'est passé**")
+    season = 12 if periode == "mois" else 4
+    cols = st.columns(3)
+    cols[0].metric(f"Dernière période ({plabel(series.index[-1], periode)})", pfmt(series.iloc[-1]))
+    cols[1].metric(f"Plus haut ({plabel(series.idxmax(), periode)})", pfmt(series.max()))
+    if len(series) > season:
+        change = series.iloc[-1] / series.iloc[-season - 1] - 1
+        cols[2].metric("Sur un an", f"{'+' if change >= 0 else ''}{ppct(change)}")
+    if f.get("histogramme") is not None:
+        h = f["histogramme"]
+        bars = alt.Chart(h).mark_bar(color=XK7["rose"], opacity=0.85).encode(
+            x=alt.X("de:Q", bin="binned", title=readable(f.get("plan", {}).get("cible")) or "Valeur"),
+            x2="a:Q", y=alt.Y("n:Q", title="Nombre de lignes"),
+            tooltip=[alt.Tooltip("de:Q", title="de", format=",.0f"), alt.Tooltip("a:Q", title="à", format=",.0f"),
+                     alt.Tooltip("n:Q", title="lignes")]).properties(height=180)
+        st.altair_chart(xk7_style(bars, "Répartition des valeurs de départ"), width="stretch", theme=None)
+
+    # 2. La prévision : l'historique en rose, la suite en bleu pointillé, la zone d'incertitude
+    st.markdown("**2. La prévision**")
+    if "prevision" not in f:
+        line = alt.Chart(history).mark_line(color=XK7["rose"], strokeWidth=3).encode(
+            x=alt.X("date:T", title=None, axis=axis),
+            y=alt.Y("valeur:Q", title=f["cible"], scale=alt.Scale(zero=False)))
+        st.altair_chart(xk7_style(line, "Évolution observée"), width="stretch", theme=None)
+    else:
+        p = f["prevision"]
+        start = pd.DataFrame({"date": [history["date"].iloc[-1]], "valeur": [history["valeur"].iloc[-1]],
+                              "bas": [history["valeur"].iloc[-1]], "haut": [history["valeur"].iloc[-1]]})
+        future = pd.concat([start, pd.DataFrame({"date": p["Période"].dt.to_timestamp(), "valeur": p["Prévision"],
+                                                 "bas": p["Bas"], "haut": p["Haut"]})], ignore_index=True)
+        x = alt.X("date:T", title=None, axis=axis)
+        y = alt.Y("valeur:Q", title=f["cible"], scale=alt.Scale(zero=False))
+        past = alt.Chart(history).mark_line(color=XK7["rose"], strokeWidth=3).encode(
+            x=x, y=y, tooltip=[alt.Tooltip("date:T", format=date_format, title="Période"),
+                               alt.Tooltip("valeur:Q", format=",.0f", title="Observé")])
+        band = alt.Chart(future).mark_area(color=XK7["bleu"], opacity=0.18).encode(x=x, y="bas:Q", y2="haut:Q")
+        ahead = alt.Chart(future).mark_line(color=XK7["bleu"], strokeWidth=3, strokeDash=[6, 4],
+                                            point={"filled": True, "color": XK7["bleu"], "size": 40}).encode(
+            x=x, y=y, tooltip=[alt.Tooltip("date:T", format=date_format, title="Période"),
+                               alt.Tooltip("valeur:Q", format=",.0f", title="Prévision"),
+                               alt.Tooltip("bas:Q", format=",.0f", title="Bas"),
+                               alt.Tooltip("haut:Q", format=",.0f", title="Haut")])
+        st.altair_chart(xk7_style(band + past + ahead, "Historique (rose) et prévision (bleu)"), width="stretch",
+                        theme=None)
+        table = pd.DataFrame({"Période": [plabel(q, periode) for q in p["Période"]],
+                              "Prévision": [pfmt(v) for v in p["Prévision"]],
+                              "Fourchette (80 %)": [f"{pfmt(a)} à {pfmt(b)}" for a, b in zip(p["Bas"], p["Haut"])]})
+        st.dataframe(table, hide_index=True, width="stretch")
+
+        # 3. La justification : les 6 modèles et leurs scores sur le passé
+        st.markdown("**3. Pourquoi ce modèle**")
+        m = f["modeles"].copy()
+        m.insert(0, "", ["🏆" if name == f["utilise"] else "" for name in m["Modèle"]])
+        m["MAPE"] = m["MAPE"].map(ppct)
+        m["MAE"] = m["MAE"].map(pfmt)
+        m["RMSE"] = m["RMSE"].map(pfmt)
+        m["Gain sur le naïf"] = m["Gain sur le naïf"].map(lambda v: ppct(v, 0))
+        st.dataframe(m, hide_index=True, width="stretch")
+        st.caption("MAPE : erreur moyenne en %. MAE : erreur moyenne dans l'unité de la valeur. RMSE : pareil, en "
+                   "pénalisant les grosses erreurs. Gain sur le naïf : erreur évitée par rapport à « demain = aujourd'hui ».")
+        with st.expander("Détail du backtest (prédictions de chaque modèle sur le passé)"):
+            st.dataframe(f["backtest"].round(0), hide_index=True, width="stretch")
+
+    # 4. La synthèse, écrite par le code
+    st.markdown("**4. En résumé**")
+    st.markdown("\n\n".join(f["synthese"]))
+
+    # Réglages : ce que XK7 a compris, modifiable, relancé en local sans repasser par l'IA
+    plan = f.get("plan") or {}
+    with st.expander("Réglages de la prévision", icon=":material/tune:"):
+        st.caption(f"Ce que XK7 a compris : valeur « {readable(plan.get('cible')) or 'nombre de lignes'} », "
+                   f"date « {readable(plan.get('date'))} »"
+                   + (f", filtres : {plan['filtres']}" if plan.get("filtres") else "") +
+                   ". Change un réglage puis relance : le calcul est refait en local, sans IA.")
+        options = ["mediane", "moyenne", "somme", "nombre"]
+        c1, c2, c3 = st.columns(3)
+        agregation = c1.selectbox("Calcul par période", options, index=options.index(plan.get("agregation", "mediane")),
+                                  format_func={"mediane": "Médiane", "moyenne": "Moyenne", "somme": "Somme",
+                                               "nombre": "Nombre de lignes"}.get, key=f"agg_{key}")
+        periodes = ["mois", "trimestre"]
+        new_periode = c2.selectbox("Période", periodes, index=periodes.index(plan.get("periode", "mois")),
+                                   format_func=str.capitalize, key=f"per_{key}")
+        horizon = c3.slider("Horizon", 1, 12, int(plan.get("horizon", 6)), key=f"hor_{key}")
+        if isinstance(key, int) and st.button("Relancer la prévision", icon=":material/refresh:", key=f"rerun_{key}"):
+            new_plan = dict(plan, agregation=agregation, periode=new_periode, horizon=horizon)
+            if agregation != "nombre" and not plan.get("cible"):
+                st.warning("Il n'y a pas de valeur à calculer : seul « Nombre de lignes » est possible.")
+            else:
+                result = run_forecast_plan(new_plan, f["donnees"])
+                messages = st.session_state["messages"]
+                if isinstance(key, int) and key < len(messages):
+                    updated = forecast_message({"type": "temps", "plan": new_plan, "donnees": f["donnees"], **result},
+                                               msg["content"].split("*Base : ")[1].split(" · ")[0])
+                    messages[key].update(updated)
+                    st.rerun()
 
 
 def analysis_message(result, db_label):
@@ -331,7 +483,7 @@ def easter_egg():
         if os.path.exists(song):
             st.audio(song, autoplay=True)
         st.markdown("**Tableau d'honneur**")
-        for col, (label, value) in zip(st.columns(4), [("Routage", "64/64"), ("SQL", "31/31"),
+        for col, (label, value) in zip(st.columns(4), [("Routage", "73/73"), ("SQL", "31/31"),
                                                         ("Qualité", "21/21"), ("Analyse", "18/18")]):
             col.metric(label, value)
         st.caption("Données envoyées aux modèles pendant toutes ces évaluations : aucune.")
@@ -379,7 +531,7 @@ with st.sidebar:
             help="Nombre d'extraits lus avant de répondre. 1 à 3 : réponse ciblée. 5 à 10 : utile si la "
                  "réponse est répartie dans les documents, ou si l'assistant ne trouve pas.",
         )
-    if agent in ("core", "sql", "qualite", "analyse"):
+    if agent in ("core", "sql", "qualite", "analyse", "prevision"):
         source = st.radio("Base interrogée", ["Base de démonstration", "Mon fichier"],
                           captions=["Chinook : une boutique de musique en ligne", "CSV, Excel ou SQLite"])
         if source == "Mon fichier":
@@ -438,8 +590,8 @@ if not st.session_state["messages"]:
     st.markdown(WELCOME[agent])
     if agent == "core":
         # Une carte par agent : ce qu'il fait et un exemple à cliquer
-        for row in (CARDS[:2], CARDS[2:]):
-            for col, (icon, name, role, example) in zip(st.columns(2), row):
+        for row in (CARDS[:3], CARDS[3:]):
+            for col, (icon, name, role, example) in zip(st.columns(3), row):
                 with col.container(border=True):
                     st.markdown(f"{icon} **{name}**")
                     st.caption(role)
@@ -462,7 +614,7 @@ for i, msg in enumerate(st.session_state["messages"]):
             st.markdown(msg["content"])
 
 # --- Nouvelle question
-if agent in ("core", "sql", "qualite", "analyse") and db_path is None:
+if agent in ("core", "sql", "qualite", "analyse", "prevision") and db_path is None:
     st.info("Dépose un fichier dans la barre latérale pour commencer.")
 elif (question := st.chat_input("Pose ta question...") or pending) and question.strip().lower() == "/kalinka":
     easter_egg()
@@ -508,6 +660,8 @@ elif question:
                 parts.append(quality_message(result["qualite"], db_label))
             if result.get("analyse"):
                 parts.append(analysis_message(result["analyse"], db_label))
+            if result.get("prevision"):
+                parts.append(forecast_message(result["prevision"], db_label))
             if result.get("message"):
                 parts.append({"content": result["message"]})
             new_msg = {"role": "assistant", "agent": chosen, **parts[0], "route": route_text,
@@ -527,6 +681,11 @@ elif question:
             with st.spinner("Analyse des données..."):
                 result = run_analysis(question, db_path)
             new_msg = {"role": "assistant", "agent": "analyse", **analysis_message(result, db_label)}
+            show_message(new_msg, len(st.session_state["messages"]))
+        elif agent == "prevision":
+            with st.spinner("Mise en concurrence des modèles sur le passé..."):
+                result = prevoir(question, db_path)
+            new_msg = {"role": "assistant", "agent": "prevision", **forecast_message(result, db_label)}
             show_message(new_msg, len(st.session_state["messages"]))
         elif agent == "rag":
             with st.spinner("Recherche dans les documents..."):

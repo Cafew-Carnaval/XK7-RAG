@@ -16,6 +16,7 @@ OFF_TOPIC_MESSAGE = ("Je ne peux pas répondre : XK7 est spécialisé dans les b
                      "Tu peux me poser une question de cours, par exemple « C'est quoi une jointure externe ? », "
                      "une question sur les données, par exemple « Quels sont les 5 clients qui ont le plus dépensé ? », "
                      "me demander une analyse avec graphique, par exemple « Comment évolue le chiffre d'affaires par mois ? », "
+                     "une prévision, par exemple « Prévois le chiffre d'affaires des 6 prochains mois », "
                      "ou me demander de vérifier la qualité des données.")
 
 SPLIT_PROMPT = """La question suivante contient deux demandes : une explication de cours sur les bases de données
@@ -55,6 +56,7 @@ class State(TypedDict, total=False):
     sql: Optional[dict]      # résultat de XK7-SQL (voir sql_agent.ask)
     qualite: Optional[dict]  # rapport de XK7-QUALITE (voir quality_agent.check_quality)
     analyse: Optional[dict]  # analyse de XK7-ANALYSE (voir analyse_agent.analyse)
+    prevision: Optional[dict]  # prévision de XK7-PREVISION (voir prevision_agent.prevoir)
     message: str             # message final quand aucun agent ne répond
     split_ok: bool           # le découpage d'une question mixte a-t-il réussi ?
     standalone: str          # question réécrite pour être comprise sans l'historique
@@ -116,6 +118,12 @@ def quality_node(state):
     return {"qualite": check_quality(state["sql_question"], state.get("db_path", DB_PATH))}
 
 
+def forecast_node(state):
+    """XK7-PREVISION : modèles de ML entraînés en local ; le modèle de langage ne voit que la structure."""
+    from prevision_agent import prevoir
+    return {"prevision": prevoir(state["sql_question"], state.get("db_path", DB_PATH))}
+
+
 def analysis_node(state):
     """XK7-ANALYSE : calculs, graphique et conclusion en local ; le modèle ne voit que la structure."""
     from analyse_agent import analyse
@@ -129,7 +137,7 @@ def off_topic_node(state):
 # --- Les chemins entre les étapes -------------------------------------------------------
 
 def after_route(state):
-    return {"rag": "rag", "sql": "sql", "qualite": "qualite", "analyse": "analyse", "les_deux": "split",
+    return {"rag": "rag", "sql": "sql", "qualite": "qualite", "analyse": "analyse", "prevision": "prevision", "les_deux": "split",
             "hors_sujet": "hors_sujet"}[state["agent"]]
 
 
@@ -145,15 +153,18 @@ def build_graph():
     graph.add_node("sql", sql_node)
     graph.add_node("qualite", quality_node)
     graph.add_node("analyse", analysis_node)
+    graph.add_node("prevision", forecast_node)
     graph.add_node("hors_sujet", off_topic_node)
 
     graph.add_edge(START, "route")
-    graph.add_conditional_edges("route", after_route, ["rag", "sql", "qualite", "analyse", "split", "hors_sujet"])
+    graph.add_conditional_edges("route", after_route, ["rag", "sql", "qualite", "analyse", "prevision", "split",
+                                                          "hors_sujet"])
     graph.add_edge("split", "rag")                      # question mixte : d'abord le cours...
     graph.add_conditional_edges("rag", after_rag, ["sql", END])   # ... puis les données
     graph.add_edge("sql", END)
     graph.add_edge("qualite", END)
     graph.add_edge("analyse", END)
+    graph.add_edge("prevision", END)
     graph.add_edge("hors_sujet", END)
     return graph.compile()
 

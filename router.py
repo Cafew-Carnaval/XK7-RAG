@@ -11,7 +11,7 @@ router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0,
                         model_kwargs={"response_format": {"type": "json_object"}})
 
 ROUTER_LOG = []   # ce qui est envoyé au modèle de routage (affiché dans « Ce que l'IA a vu »)
-AGENTS = ("rag", "sql", "qualite", "analyse", "les_deux", "hors_sujet")
+AGENTS = ("rag", "sql", "qualite", "analyse", "prevision", "les_deux", "hors_sujet")
 
 ROUTER_PROMPT = """Tu es XK7-CORE, le chef d'orchestre d'un assistant data. Tu ne réponds jamais toi-même :
 tu décides quel agent doit traiter la question de l'utilisateur.
@@ -54,6 +54,15 @@ Les agents :
   dépend, graphique, courbe, visualise, analyse. Sans un de ces mots, c'est "sql", même avec "par pays",
   "par genre", "par mois", "le mieux", "le plus", "la moyenne" : "Quel genre se vend le mieux en France ?",
   "Donne la durée moyenne des morceaux par genre", "Le chiffre d'affaires par pays" vont à "sql".
+- "prevision" : XK7-PREVISION prévoit le FUTUR à partir de l'historique : "prévois", "prévision", "prédire",
+  "comment VA évoluer", "le mois prochain", "l'an prochain", "dans 6 mois", "combien de ventes au prochain
+  trimestre ?". Il estime aussi une valeur à partir de caractéristiques ("combien vaut un T3 de 65 m² à Rezé ?",
+  "quel prix pour une maison de 120 m² ?"). Attention au temps du verbe : "comment ÉVOLUE le chiffre d'affaires",
+  au présent ou au passé, décrit ce qui s'est passé et va à "analyse" ; seule une question tournée vers l'avenir
+  va à "prevision".
+- Attention au mot "vérifie" : "vérifie-le sur...", "vérifie-la sur...", "montre-le sur..." juste après une question
+  de cours veulent dire APPLIQUER l'explication aux données ("Pourquoi un NOT IN peut-il donner un résultat vide ?
+  Vérifie-le sur les clients sans facture.") : c'est "les_deux", pas un contrôle de qualité.
 - "les_deux" : la question demande EXPLICITEMENT une explication de cours ("explique", "c'est quoi",
   "pourquoi", "comment fonctionne") ET un résultat tiré des données (ex. "explique X, puis applique-le
   à la base"). Une simple question sur les données, même difficile, va à "sql" : XK7-SQL explique déjà
@@ -67,9 +76,10 @@ En cas de doute :
 - entre "rag" et "hors_sujet", choisis "rag" : XK7-RAG dira lui-même s'il ne trouve rien dans ses documents ;
 - entre "sql" et "les_deux", choisis "sql" ;
 - entre "sql" et "analyse", choisis "analyse" seulement si la question parle d'évolution, de tendance, de
-  répartition, de part, de comparaison, de lien ou de graphique ; sinon "sql".
+  répartition, de part, de comparaison, de lien ou de graphique ; sinon "sql" ;
+- entre "analyse" et "prevision", choisis "prevision" seulement si la question porte sur l'avenir.
 
-Base de données actuellement disponible pour "sql", "qualite" et "analyse" : {source}
+Base de données actuellement disponible pour "sql", "qualite", "analyse" et "prevision" : {source}
 Noms des tables : {tables}
 Si l'utilisateur a déposé un fichier, "le fichier", "l'Excel" ou "le document" désignent ce fichier, et non
 les ouvrages de XK7-RAG.
@@ -80,7 +90,7 @@ Questions précédentes de l'utilisateur (pour comprendre une question de suivi 
 Question : {question}
 
 Réponds uniquement avec un JSON :
-{{"agent": "rag" | "sql" | "qualite" | "analyse" | "les_deux" | "hors_sujet",
+{{"agent": "rag" | "sql" | "qualite" | "analyse" | "prevision" | "les_deux" | "hors_sujet",
   "raison": "une phrase courte",
   "question": "la question réécrite pour être compréhensible seule, sans l'historique"}}
 Pour "question" : si la question est une suite ("et en 2013 ?", "et ceux qui ont dépensé moins ?"), complète-la
