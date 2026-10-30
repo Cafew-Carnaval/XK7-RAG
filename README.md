@@ -46,7 +46,7 @@ flowchart LR
 - Une question mixte est découpée en une question de cours et une question sur les données, envoyées chacune à son agent. Les deux réponses sont affichées l'une sous l'autre, sans être fusionnées par un modèle : le résultat de XK7-SQL n'est jamais montré à une IA.
 - Le routeur ne voit que la question, les questions précédentes, les noms des tables et le nom du fichier déposé. Jamais les réponses ni les données.
 - L'interface affiche le choix du chef, sa raison, la question comprise et le découpage, pour que chaque décision soit vérifiable.
-- Fichiers : `router.py` (routage et réécriture), `core.py` (graphe LangGraph et découpage), `eval_router_questions.py` et `evaluate_router.py` (évaluation).
+- Fichiers : `router.py` (routage et réécriture), `core.py` (graphe LangGraph et découpage), `eval_router_questions.py` et `evaluate_router.py` (évaluation), `router_bench.py` et `evaluate_router_bench.py` (grand banc de 473 questions).
 
 ### Évaluation du routage
 
@@ -65,6 +65,40 @@ flowchart LR
 | Temps moyen par décision | environ 1 s |
 
 Après chaque correction, de nouvelles questions sont écrites, pour vérifier que les nouvelles règles marchent en général et pas seulement sur les questions qui les ont fait naître (éviter le surapprentissage du prompt).
+
+### Le grand banc de test : 473 questions, dont 204 jamais vues pendant le réglage
+
+Les 73 questions ci-dessus ont servi à construire le prompt : elles ne peuvent plus mesurer honnêtement le routeur. D'où un banc plus large, organisé comme un jeu d'apprentissage automatique :
+
+- **473 questions** sur 7 agents et 4 bases (musique, café, ventes immobilières, fichier plein d'erreurs), dont 90 pièges (« Analyse le fichier. » est un contrôle de qualité, « Combien de ventes en 2025 ? » n'est pas une prévision) et des styles variés : soutenu, familier (« cb de clients en france »), fautes de frappe, très court (« index ? »), anglais, questions de suite, charabia.
+- **Deux lots** : 269 questions de **réglage** (on lit les erreurs et on corrige le prompt) et 204 de **contrôle** (jamais lues avant le score final). Le lot de chaque question est fixé par l'empreinte de son texte : ajouter ou corriger une question ne fait jamais passer une autre question d'un lot à l'autre.
+- **13 questions écrites à la main par l'utilisateur**, sans voir les autres, toutes au contrôle.
+- Chaque fichier est réellement chargé : le routeur voit les vrais noms de tables, comme dans l'application. Pour une question de suite, la question précédente est d'abord routée elle-même, et son agent est mis dans l'historique.
+
+| Mesure | Résultat |
+|---|---|
+| Réglage, premier essai | 271/275 (98,5 %) |
+| Réglage, après corrections (4 runs) | entre 263 et 266/269 (97,8 à 98,9 %) |
+| **Contrôle (4 runs, prompt figé)** | **199 à 200/204, soit 97,9 % en moyenne** |
+| Questions écrites à la main | 12/13 |
+| Pièges du contrôle | 30 à 31/33 |
+| Questions de suite | 7/7 |
+| Temps | environ 1 s par décision, 30 s pour 200 questions envoyées en parallèle |
+| Coût | moins de 10 centimes par run de 200 questions (GPT-4o-mini) |
+
+Le score de contrôle est au niveau du score de réglage : les règles ajoutées marchent sur des questions jamais vues, le prompt n'a pas été « appris par cœur ».
+
+**Les erreurs restantes du contrôle** (lues une fois le prompt figé, non corrigées) :
+- 3 questions de données parties au contrôle de qualité (« Combien de clients n'ont pas de téléphone ? », « Quelles commandes ont une date manquante ? », « ligne sql pour nettoyer cette base de donnée ») : la frontière entre « compter des valeurs vides » et « contrôler la qualité » est la plus fragile. La conséquence reste douce : XK7-QUALITE signale aussi ces valeurs manquantes. Pour la dernière, l'utilisateur attendait XK7-SQL, le prompt dit « nettoyer » → qualité : c'est un désaccord de conception plus qu'une erreur.
+- « Explique-moi quels clients ont le plus dépensé » envoyée à l'analyse.
+- « prevision ca » (abréviation de chiffre d'affaires, sans contexte) prise pour du hors sujet.
+
+**Ce que le réglage a appris** :
+1. Une question de suite courte (« Et les surfaces ? ») perdait son agent, même avec l'exemple écrit dans le prompt. Correction **dans le code** : une suite courte commençant par « Et » garde l'agent de la réponse précédente, sauf mot qui change la demande (graphique, prévision, analyse). Ce que le code peut garantir, on ne le demande pas au modèle.
+2. « Combien de ventes en 2024 ? » partait en prévision : le modèle raisonne avec sa propre date. Correction : la date du jour est donnée dans le prompt, et c'est le verbe (« y aura-t-il », « attendre ») qui décide du futur, pas l'année. Une règle « une année = pas le futur » était allée trop loin (« Combien de factures attendre en 2014 ? » sur des données qui s'arrêtent en 2013).
+3. Même à température 0, GPT-4o-mini ne répond pas toujours pareil : une graine fixe (`seed=42`) stabilise les décisions, sans les rendre parfaitement identiques (4 runs du contrôle : 200, 200, 200, 199).
+4. Ne jamais corriger une étiquette d'après la réponse du routeur : « Quel pourcentage des ventes vient d'Europe ? » avait été relabellisée en sql après une erreur, puis le routeur a répondu l'inverse au run suivant. L'étiquette a été remise à « analyse » et une règle claire écrite (une part ou un pourcentage va à l'analyse).
+5. Un découpage réglage / contrôle qui dépend de l'ordre des questions fait fuir des questions du contrôle vers le réglage dès qu'on en change une : d'où le lot fixé par l'empreinte du texte.
 
 ### Ce que les tests de bout en bout ont révélé
 
@@ -398,7 +432,9 @@ python vectorstore.py      # construit la base vectorielle
 streamlit run app.py       # lance l'interface sur http://localhost:8501
 python evaluate.py         # évaluation de XK7-RAG
 python evaluate_sql.py     # évaluation de XK7-SQL
-python evaluate_router.py  # évaluation du routage de XK7-CORE
+python evaluate_router.py  # évaluation du routage de XK7-CORE (73 questions)
+python evaluate_router_bench.py              # grand banc, lot de réglage (erreurs détaillées)
+python evaluate_router_bench.py --controle   # grand banc, lot de contrôle (score final, erreurs masquées)
 python evaluate_quality.py # évaluation de XK7-QUALITE (crée les fichiers de test si besoin)
 python evaluate_analyse.py # évaluation de XK7-ANALYSE
 python analyse_agent.py    # quatre analyses de démonstration dans le terminal
@@ -465,8 +501,7 @@ Les deux points manquants sont des oublis, pas des erreurs : la réponse sur les
 
 ## Prochaines étapes
 
-- XK7-ANALYSE : tendances, comparaisons et graphiques, calculés en local.
-- Mode 100 % local avec Ollama, et tests de XK7-SQL sur des bases moins connues et des questions ambiguës.
+- Mode 100 % local avec Ollama (routeur mesuré sur le grand banc), et tests de XK7-SQL sur des bases moins connues et des questions ambiguës.
 - Réduire le temps de réponse (appels en parallèle, cache, modèle plus léger pour certaines étapes).
 - Recherche hybride (sens et mots-clés) et reranking pour les documentations très denses.
 - API avec FastAPI, conteneur Docker et suivi des appels avec LangSmith.

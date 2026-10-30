@@ -1,4 +1,5 @@
 import json
+from datetime import date
 import sqlite3
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -7,7 +8,8 @@ from sql_schema import DB_PATH, connect
 load_dotenv()
 
 # Petit modèle rapide et peu cher : décider où envoyer une question ne demande pas GPT-4o
-router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0,
+# temperature 0 + seed : la même question reçoit (presque toujours) la même décision, d'une exécution à l'autre
+router_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, seed=42,
                         model_kwargs={"response_format": {"type": "json_object"}})
 
 ROUTER_LOG = []   # ce qui est envoyé au modèle de routage (affiché dans « Ce que l'IA a vu »)
@@ -39,7 +41,8 @@ Les agents :
   inférieures à 30 en août ?") va à "sql", qui écrit la requête sans jamais l'exécuter. Une question générale de
   syntaxe, sans lien avec les données ("comment écrire un UPDATE ?"), reste du cours ("rag").
   Une demande vague de REGARDER, OUVRIR ou EXAMINER le fichier déposé, ou de l'ANALYSER sans préciser quelle mesure, l'Excel, le CSV, le document
-  déposé ou la base ("regarde l'Excel", "qu'est-ce que tu penses de mon fichier ?") va aussi à "qualite" :
+  déposé ou la base ("regarde l'Excel", "qu'est-ce que tu penses de mon fichier ?", et même un simple "qu'en penses-tu ?" quand
+  un fichier est déposé) va aussi à "qualite" :
   son rapport donne un aperçu complet (tables, nombre de lignes, état des données). Mais une question qui demande
   un chiffre précis sur le fichier ("combien de lignes contient mon fichier ?", "combien de colonnes ?",
   "combien de tables ?") va à "sql".
@@ -52,14 +55,19 @@ Les agents :
   "analyse" seulement si la question contient un mot EXPLICITE d'analyse : évolution / évolue, tendance, au fil du
   temps, répartition / se répartissent, part, proportion, pourcentage, compare / comparaison, lien, corrélation,
   dépend, graphique, courbe, visualise, analyse. Sans un de ces mots, c'est "sql", même avec "par pays",
-  "par genre", "par mois", "le mieux", "le plus", "la moyenne" : "Quel genre se vend le mieux en France ?",
-  "Donne la durée moyenne des morceaux par genre", "Le chiffre d'affaires par pays" vont à "sql".
+  "par genre", "par mois", "par année", "le mieux", "le plus", "la moyenne" : "Quel genre se vend le mieux en France ?",
+  "Donne la durée moyenne des morceaux par genre", "Le chiffre d'affaires par pays", "Le chiffre d'affaires par année"
+  vont à "sql". Une PART ou un POURCENTAGE, même d'un seul groupe ("Quel pourcentage des ventes vient d'Europe ?",
+  "Quelle part des ventes concerne le neuf ?"), va à "analyse" : le graphique montre cette part face au reste.
 - "prevision" : XK7-PREVISION prévoit le FUTUR à partir de l'historique : "prévois", "prévision", "prédire",
   "comment VA évoluer", "le mois prochain", "l'an prochain", "dans 6 mois", "combien de ventes au prochain
-  trimestre ?". Il estime aussi une valeur à partir de caractéristiques ("combien vaut un T3 de 65 m² à Rezé ?",
+  trimestre ?". Il estime aussi la valeur ACTUELLE d'un bien à partir de ses caractéristiques ("combien vaut un T3 de 65 m² à Rezé ?",
   "quel prix pour une maison de 120 m² ?"). Attention au temps du verbe : "comment ÉVOLUE le chiffre d'affaires",
   au présent ou au passé, décrit ce qui s'est passé et va à "analyse" ; seule une question tournée vers l'avenir
-  va à "prevision".
+  va à "prevision". Une année seule ne dit pas si c'est le futur : c'est le VERBE qui décide.
+  "Combien de ventes en 2025 ?" (présent, sans mot d'avenir) va à "sql", car les données peuvent contenir cette année ;
+  "Combien de ventes y aura-t-il en 2026 ?", "Combien de factures attendre en 2014 ?" (futur, attendre, prévoir)
+  vont à "prevision".
 - Attention au mot "vérifie" : "vérifie-le sur...", "vérifie-la sur...", "montre-le sur..." juste après une question
   de cours veulent dire APPLIQUER l'explication aux données ("Pourquoi un NOT IN peut-il donner un résultat vide ?
   Vérifie-le sur les clients sans facture.") : c'est "les_deux", pas un contrôle de qualité.
@@ -79,10 +87,18 @@ En cas de doute :
   répartition, de part, de comparaison, de lien ou de graphique ; sinon "sql" ;
 - entre "analyse" et "prevision", choisis "prevision" seulement si la question porte sur l'avenir.
 
+Date du jour : {today}. Une année passée ou en cours n'est jamais le futur.
+
 Base de données actuellement disponible pour "sql", "qualite", "analyse" et "prevision" : {source}
 Noms des tables : {tables}
 Si l'utilisateur a déposé un fichier, "le fichier", "l'Excel" ou "le document" désignent ce fichier, et non
 les ouvrages de XK7-RAG.
+
+Une question de suivi courte qui change seulement le sujet ou le filtre ("Et pour les maisons ?", "Et les surfaces ?",
+"Et en 2013 ?", "Et à Nantes ?") garde le MÊME agent que la question précédente : une suite d'analyse reste "analyse",
+une suite de contrôle de qualité reste "qualite", une suite de prévision ou d'estimation reste "prevision"
+("Et à Nantes ?" après "Combien vaut un T3 à Rezé ?" va à "prevision"). Elle ne change d'agent que si elle demande
+autre chose ("Fais-en un graphique." après une question de données va à "analyse").
 
 Questions précédentes de l'utilisateur (pour comprendre une question de suivi comme "et en 2013 ?") :
 {history}
@@ -107,6 +123,28 @@ def table_names(db_path=DB_PATH):
         conn.close()
 
 
+FUTURE_OR_CHART = ("graphique", "courbe", "prevoi", "prevision", "predi", "va evoluer", "evoluera", "analyse")
+
+
+def plain(text):
+    """Minuscules sans accents, pour repérer des mots simplement."""
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
+
+
+def follow_up_agent(question, history):
+    """Une question de suite courte (« Et à Nantes ? », « Et les surfaces ? ») garde l'agent de la réponse précédente.
+    Ce que le code peut garantir, on ne le demande pas au modèle. Renvoie None si la règle ne s'applique pas :
+    pas d'historique, question longue, ou mot qui change la demande (graphique, prévision, analyse)."""
+    q = plain(question).strip()
+    if not q.startswith("et ") or len(q.split()) > 6 or any(w in q for w in FUTURE_OR_CHART):
+        return None
+    for m in reversed(history or []):
+        if m.get("role") == "assistant" and m.get("agent") in AGENTS:
+            return m["agent"] if m["agent"] not in ("hors_sujet", "les_deux") else None
+    return None
+
+
 def route(question, history=None, db_path=DB_PATH, source="la base de démonstration Chinook"):
     """Décide quel agent doit répondre. Renvoie {"agent": ..., "raison": ..., "question": ...},
     où "question" est la question réécrite pour être comprise sans l'historique.
@@ -116,6 +154,7 @@ def route(question, history=None, db_path=DB_PATH, source="la base de démonstra
     prompt = ROUTER_PROMPT.format(
         tables=", ".join(table_names(db_path)),
         source=source,
+        today=date.today().strftime("%d/%m/%Y"),
         history="\n".join(f"- {q}" for q in previous) or "(aucune)",
         question=question,
     )
@@ -129,6 +168,10 @@ def route(question, history=None, db_path=DB_PATH, source="la base de démonstra
         # En cas de réponse illisible, on choisit le RAG : au pire, il dira qu'il ne trouve pas
         decision = {"agent": "rag", "raison": "décision illisible, envoi par défaut au RAG"}
     # Question autonome : on la garde seulement si elle reste raisonnable (le modèle n'a pas répondu à la place)
+    previous_agent = follow_up_agent(question, history)
+    if previous_agent and decision["agent"] != previous_agent:
+        decision["agent"] = previous_agent
+        decision["raison"] = f"question de suite : même agent que la réponse précédente ({previous_agent})"
     rewritten = str(decision.get("question") or "").strip()
     limit = len(question) + sum(len(q) for q in previous) + 50
     decision["question"] = rewritten if rewritten and len(rewritten) <= limit else question
