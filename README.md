@@ -402,9 +402,51 @@ Après ces corrections : 9/9 sur la base inconnue, sans régression sur Chinook.
 - Même à température 0, la requête écrite peut varier d'un lancement à l'autre. C'est pour cela que l'évaluation porte sur les résultats.
 - Les questions ambiguës ("nos meilleurs clients", selon quel critère ?) ne sont pas encore testées.
 
+## API et Docker
+
+XK7 a deux portes vers le même XK7-CORE : l'application Streamlit pour les humains, et une **API FastAPI** pour les autres programmes (un intranet, un bot, un tableau de bord). Les agents ne sont écrits qu'une fois.
+
+La démo publique reste l'application Streamlit en ligne. L'API et le conteneur Docker se lancent en local (ou sur n'importe quel serveur qui accepte une image Docker) : ils ne sont pas hébergés, car chaque question a un coût.
+
+### L'API (`api.py`)
+
+| Route | Rôle |
+|---|---|
+| `GET /health` | L'API est-elle en vie, la clé OpenAI est-elle chargée ? |
+| `GET /bases` | Les bases de démonstration : `chinook` (musique), `immobilier` (ventes DVF 2021-2025), `cafe` |
+| `POST /ask` | Une question sur une base de démonstration → réponse de XK7-CORE en JSON |
+| `POST /ask-file` | Une question sur un fichier envoyé (Excel, CSV ou SQLite, 10 Mo au plus) |
+
+```bash
+curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -H "X-API-Key: ..." \
+     -d '{"question": "Combien vaut un T3 de 65 m² à Rezé ?", "base": "immobilier"}'
+```
+
+La réponse contient l'agent choisi et sa raison, la question comprise, puis le résultat de l'agent : pour l'estimation du T3, 174 050 € (de 118 536 à 232 847 €), le tableau des 5 modèles, l'importance des variables, un résumé des 1 758 ventes semblables et la synthèse écrite par le code (3 Ko de JSON, environ 17 s).
+
+- **Documentation automatique** sur `/docs` : chaque route s'essaie dans le navigateur.
+- **Clé d'accès** : si `XK7_API_KEY` est défini, chaque appel doit envoyer l'en-tête `X-API-Key` (bouton « Authorize » dans `/docs`). Chaque question appelle l'API OpenAI, donc coûte : pas d'accès libre.
+- **Réponses propres** : les résultats des agents (tableaux pandas, nombres numpy, graphiques Altair) sont convertis en JSON, les tableaux coupés à 200 lignes, et ce qui ne sert qu'à l'interface (prix bruts des cas semblables, menus du simulateur) est résumé ou retiré.
+- **Garde-fous** : question vide ou de plus de 500 caractères refusée (422), fichier trop gros ou illisible refusé avec un message clair.
+- **Confidentialité inchangée** : les données restent sur le serveur, les modèles ne voient que la structure et la question.
+
+### Docker
+
+Un seul `Dockerfile` (Python 3.12, dépendances, code, données de démonstration, base vectorielle) et un `docker-compose.yml` qui lance les deux portes :
+
+```bash
+docker compose up --build     # première fois : environ 7 minutes, ensuite quelques secondes
+# application : http://localhost:8501     API : http://localhost:8000/docs
+docker compose down
+```
+
+- Les **secrets ne sont jamais dans l'image** : `.dockerignore` exclut `.env`, et docker-compose le lit au lancement.
+- Les dépendances sont installées avant la copie du code : modifier le code ne réinstalle pas tout (cache de Docker).
+- Testé sous Windows avec Docker Desktop (WSL 2) : appli et API répondent comme hors conteneur, dans un Linux vierge, sans l'environnement Python de développement.
+
 ## Technologies
 
-Python 3.12, LangChain, LangGraph, OpenAI (GPT-4o, GPT-4o-mini, text-embedding-3-small), ChromaDB, SQLite, pandas, Streamlit, pypdf.
+Python 3.12, LangChain, LangGraph, OpenAI (GPT-4o, GPT-4o-mini, text-embedding-3-small), ChromaDB, SQLite, pandas, scikit-learn, Altair, Streamlit, FastAPI, Docker, pypdf.
 
 ## Installation
 
@@ -423,13 +465,17 @@ Créer un fichier `.env` à la racine (il n'est jamais versionné) :
 ```
 OPENAI_API_KEY=sk-...
 APP_PASSWORD=un-mot-de-passe-dedie-au-projet
+XK7_API_KEY=une-cle-pour-l-api            # facultatif : protège l'API
 ```
+
+Ou, sans installer Python : `docker compose up --build` (voir « API et Docker »).
 
 Placer les PDF dans le dossier `data/` avec les noms attendus par `loader.py` (`test.pdf`, `database_design.pdf`, `postgresql.pdf`, `redbook.pdf`). La base Chinook (`data/chinook.db`) est fournie dans le dépôt. Puis :
 
 ```bash
 python vectorstore.py      # construit la base vectorielle
 streamlit run app.py       # lance l'interface sur http://localhost:8501
+uvicorn api:app --reload   # lance l'API sur http://localhost:8000/docs
 python evaluate.py         # évaluation de XK7-RAG
 python evaluate_sql.py     # évaluation de XK7-SQL
 python evaluate_router.py  # évaluation du routage de XK7-CORE (73 questions)
@@ -504,7 +550,7 @@ Les deux points manquants sont des oublis, pas des erreurs : la réponse sur les
 - Mode 100 % local avec Ollama (routeur mesuré sur le grand banc), et tests de XK7-SQL sur des bases moins connues et des questions ambiguës.
 - Réduire le temps de réponse (appels en parallèle, cache, modèle plus léger pour certaines étapes).
 - Recherche hybride (sens et mots-clés) et reranking pour les documentations très denses.
-- API avec FastAPI, conteneur Docker et suivi des appels avec LangSmith.
+- Suivi des appels avec LangSmith, et mise en ligne de l'API (le conteneur est prêt pour Azure, AWS ou Google Cloud).
 
 ## Sources
 
