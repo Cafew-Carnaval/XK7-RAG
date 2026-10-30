@@ -1,0 +1,10 @@
+# Jamais dans l'image : les secrets, l'environnement local, l'historique Git, les fichiers temporaires
+.env
+.venv/
+venv/
+.git/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+router_bench_*.json
+*.log

@@ -1,0 +1,19 @@
+# Lancer XK7 :  docker compose up --build
+#   application : http://localhost:8501
+#   API         : http://localhost:8000/docs
+# Les deux services partagent la même recette (Dockerfile) ; les secrets viennent du fichier .env (jamais copié dans l'image).
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file: .env
+    restart: unless-stopped
+
+  api:
+    build: .           # même recette : la 2e construction reprend tout du cache, elle est instantanée
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    env_file: .env
+    restart: unless-stopped
